@@ -1,0 +1,22 @@
+{
+  "skillId": "cmulqhlnc000opooxymwkrpuq",
+  "skillName": "generate-self-review-report",
+  "optimizer": "llm-fewshot",
+  "generatedAt": "2026-10-01T06:13:52.719Z",
+  "executionCount": 1,
+  "description": "1. Use the skill:self-review-report tool to generate the self-review report 2. Use the autonomy_log tool to get recent autonomy actions 3. Use the evolution_list tool to get evolution proposals 4. Use",
+  "examples": [
+    {
+      "input": "Generate a self-review report that includes evolution proposals, skill usage statistics, memory metrics, and recent autonomous actions",
+      "output": "I'll generate a comprehensive self-review report by gathering the requested information from all relevant tools."
+    },
+    {
+      "input": "Create a summary of my recent activities including evolution proposals, skill usage stats, memory stats, and autonomy actions",
+      "output": "I'll compile a detailed self-review report by collecting data on evolution proposals, skill usage statistics, memory metrics, and recent autonomous actions."
+    },
+    {
+      "input": "I need a self-review that covers evolution proposals, skill usage statistics, memory statistics, and recent autonomy actions",
+      "output": "I'll generate a comprehensive self-review report by gathering information on evolution proposals, skill usage statistics, memory metrics, and recent autonomous actions."
+    }
+  ]
+}

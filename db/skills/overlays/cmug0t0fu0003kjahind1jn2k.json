@@ -1,0 +1,22 @@
+{
+  "skillId": "cmug0t0fu0003kjahind1jn2k",
+  "skillName": "self-review-report",
+  "optimizer": "llm-fewshot",
+  "generatedAt": "2026-09-29T21:00:32.153Z",
+  "executionCount": 3,
+  "description": "1. Run autonomy_log to get recent autonomy actions\n2. Run evolution_list to get evolution proposals\n3. Run learning_status to get skill usage stats\n4. Run mist_self_status to get system status and mem",
+  "examples": [
+    {
+      "input": "Run self-review summarizing evolution proposals, skill usage stats, memory stats and recent autonomy actions",
+      "output": "Self-Review Report\n\n1. Evolution Proposals:\n   - Proposal ID: EP001\n   - Title: Enhanced Natural Language Processing\n   - Status: In Progress\n   - Description: Improve understanding of context and nuance in user queries\n   - Estimated Completion: 2023-12-15\n   \n   - Proposal ID: EP002\n   - Title: Memory Optimization\n   - Status: Completed\n   - Description: Reduce memory footprint while maintaining performance\n   - Completion Date: 2023-11-20\n\n2. Skill Usage Stats:\n   - Total Skills: 45\n   - Most Used Skill: information-retrieval (1,247 uses)\n   - Least Used Skill: specialized-analysis (23 uses"
+    },
+    {
+      "input": "Generate a self-review report covering all aspects of my system performance",
+      "output": "Self-Review Report\n\n1. Evolution Proposals:\n   - Proposal ID: EP003\n   - Title: Cross-Modal Learning Integration\n   - Status: Proposed\n   - Description: Integrate learning across different data modalities\n   - Priority: High\n   \n   - Proposal ID: EP004\n   - Title: Adaptive Response Generation\n   - Status: In Development\n   - Description: Dynamically adjust response style based on user preferences\n   - Estimated Completion: 2024-01-10\n\n2. Skill Usage Stats:\n   - Total Skills: 48 (3 new this month)\n   - Most Used Skill: information-retrieval (1,389 uses)\n   - Most Improved Skill: context-underst"
+    },
+    {
+      "input": "Create a comprehensive self-review of my system's recent performance",
+      "output": "Self-Review Report\n\n1. Evolution Proposals:\n   - Proposal ID: EP005\n   - Title: Proactive Error Prevention\n   - Status: Research Phase\n   - Description: Implement predictive error detection and prevention mechanisms\n   - Estimated Start: 2024-01-01\n   \n   - Proposal ID: EP006\n   - Title: Multi-Context Understanding\n   - Status: In Development\n   - Description: Improve ability to maintain and switch between multiple contexts\n   - Estimated Completion: 2024-02-15\n\n2. Skill Usage Stats:\n   - Total Skills: 50 (2 new this month)\n   - Most Used Skill: information-retrieval (1,523 uses)\n   - Fastest "
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "lastHead": "c3e795af71bff38bb406c62a2e7a63869cdc8eb2",
+  "localHead": "c3e795af71bff38bb406c62a2e7a63869cdc8eb2",
+  "lastScanAt": "2026-10-04T21:25:15.012Z",
+  "lastUpdateAt": null,
+  "status": "error",
+  "sweeps": 57,
+  "history": [],
+  "lastDigest": null,
+  "pendingDigest": null,
+  "error": "clone at /home/z/Mark-LV missing or corrupt (git rev-parse failed) — re-clone with: git clone https://github.com/FatihMakes/Mark-LV.git /home/z/Mark-LV",
+  "alerted": [
+    "clone-unusable"
+  ]
+}

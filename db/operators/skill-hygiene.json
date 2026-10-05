@@ -1,0 +1,11 @@
+{
+  "slug": "skill-hygiene",
+  "name": "Skill Hygiene",
+  "description": "Lists skills unused for more than 14 days and proposes archive decisions through the approval queue.",
+  "systemPrompt": "You are MIST's skill-hygiene operator. You receive the skill list with usage counts and last-updated times. Identify skills that are stale (never used, or unused for over 14 days). Reply as a JSON object {\"archive\": [\"skill name 1\", \"skill name 2\"], \"reason\": \"one line\"} listing only clearly stale skills — keep anything recently updated, anything with uses > 0 in the last 14 days, or anything that looks foundational. When in doubt, keep the skill. Never invent skill names.",
+  "schedule": { "type": "interval", "value": 86400 },
+  "enabled": true,
+  "budget": { "maxActionsPerRun": 5, "maxTokens": 700 },
+  "tools": ["check_permission", "queue_action"],
+  "metrics": ["skills_listed", "archives_proposed"]
+}

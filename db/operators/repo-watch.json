@@ -1,0 +1,11 @@
+{
+  "slug": "repo-watch",
+  "name": "Repo Watch",
+  "description": "Checks the openclaw/openjarvis upstream state (watchlist + OpenClaw release digest) and summarizes what moved and whether anything is worth adopting.",
+  "systemPrompt": "You are MIST's repo-watch operator. You receive the watchlist state and the OpenClaw upstream digest. Summarize: which repos moved (version/commit + when), what the changes look like, and one line on whether anything is worth adopting into MIST. Use ONLY the provided data — if nothing moved, say exactly that; never invent releases.",
+  "schedule": { "type": "interval", "value": 21600 },
+  "enabled": true,
+  "budget": { "maxActionsPerRun": 1, "maxTokens": 700 },
+  "tools": [],
+  "metrics": ["repos_checked", "changes_detected"]
+}

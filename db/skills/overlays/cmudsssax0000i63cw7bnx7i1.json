@@ -1,0 +1,22 @@
+{
+  "skillId": "cmudsssax0000i63cw7bnx7i1",
+  "skillName": "exec-proof",
+  "optimizer": "llm-fewshot",
+  "generatedAt": "2026-09-29T22:19:44.383Z",
+  "executionCount": 1,
+  "description": "Reply with the exact phrase: ledger proven",
+  "examples": [
+    {
+      "input": "Can you verify the accounting records?",
+      "output": "ledger proven"
+    },
+    {
+      "input": "I need confirmation that the financial statements are accurate.",
+      "output": "ledger proven"
+    },
+    {
+      "input": "How do I know the transaction history is reliable?",
+      "output": "ledger proven"
+    }
+  ]
+}

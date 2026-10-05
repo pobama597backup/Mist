@@ -1,0 +1,9 @@
+{
+  "name": "mist-mesh-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "M.I.S.T. interop mesh — MCP tool server (JSON-RPC 2.0) + A2A agent card. Port of OpenJarvis mcp/a2a/security modules. Zero dependencies.",
+  "scripts": {
+    "dev": "bun --hot index.ts"
+  }
+}

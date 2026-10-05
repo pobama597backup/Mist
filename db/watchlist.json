@@ -1,0 +1,34 @@
+{
+  "entries": [
+    {
+      "repo": "openclaw/openclaw",
+      "channel": "npm",
+      "label": "OpenClaw",
+      "version": "2026.9.8",
+      "version_label": "v2026.9.8",
+      "updated_at": null,
+      "first_seen": false,
+      "checked_at": "2026-10-04T20:44:17.229Z",
+      "changed": true,
+      "last_change_at": "2026-10-04T20:44:17.229Z",
+      "error": null,
+      "note": "sovereign assistant — MIST borrows its patterns; releases feed the evolution engine"
+    },
+    {
+      "repo": "anthropics/skills",
+      "channel": "atom",
+      "label": "Anthropic Skills",
+      "version": "8a1541c4a3ff",
+      "version_label": "8a1541c — Update claude-api skill: Claude Opus 5.5 default, Claude Sonnet 5.5, …",
+      "updated_at": "2026-09-29T02:20:03Z",
+      "first_seen": false,
+      "checked_at": "2026-10-04T20:44:17.229Z",
+      "changed": false,
+      "last_change_at": "2026-09-29T12:44:33.217Z",
+      "error": null,
+      "note": "OpenClaw/Anthropic-style SKILL.md ecosystem — imported natively by the skills service"
+    }
+  ],
+  "last_sweep_at": "2026-10-04T20:44:17.229Z",
+  "alerts_raised": 5
+}

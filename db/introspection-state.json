@@ -1,0 +1,128 @@
+{
+  "last_run_at": "2026-10-04T21:28:29.071Z",
+  "last_report": {
+    "ran_at": "2026-10-04T21:28:29.071Z",
+    "source": "heartbeat",
+    "duration_ms": 3398,
+    "probes": [
+      {
+        "id": "providers",
+        "status": "pass",
+        "ms": 46,
+        "findings": [],
+        "note": "8 provider(s) configured: nvidia, openrouter, kilo, pollinations, llm7, ovh, core, offline-mind"
+      },
+      {
+        "id": "apis",
+        "status": "pass",
+        "ms": 1223,
+        "findings": [],
+        "note": "8/8 endpoints healthy"
+      },
+      {
+        "id": "ui",
+        "status": "pass",
+        "ms": 3076,
+        "findings": []
+      },
+      {
+        "id": "tools",
+        "status": "pass",
+        "ms": 3356,
+        "findings": [],
+        "note": "137 tools registered"
+      },
+      {
+        "id": "toolchain-honesty",
+        "status": "pass",
+        "ms": 43,
+        "findings": [],
+        "note": "6 promise-shapes + 4 answer-shapes tested"
+      },
+      {
+        "id": "evolution-gates",
+        "status": "pass",
+        "ms": 389,
+        "findings": []
+      },
+      {
+        "id": "db",
+        "status": "pass",
+        "ms": 14,
+        "findings": []
+      },
+      {
+        "id": "devlog",
+        "status": "pass",
+        "ms": 13,
+        "findings": []
+      },
+      {
+        "id": "self-model",
+        "status": "warn",
+        "ms": 15,
+        "findings": [
+          {
+            "fingerprint": "f1m8070m",
+            "severity": "warn",
+            "area": "self-model",
+            "title": "4 stale self-knowledge memories",
+            "detail": "Memories describing OLD versions of her systems (pre self-model v1.2.0): lesson/speech-guard-drill, lesson/exact-changes-not-drafting, lesson/unique-anchors-gate-mechanics, self-modification-rule. These can make her deny systems she really has (\"I can't dream\" class).",
+            "repair_class": "auto",
+            "repair_hint": "upsert the canonical mist:self-systems memory from the current manifest"
+          }
+        ],
+        "note": "self-model v1.2.0"
+      },
+      {
+        "id": "dreams",
+        "status": "pass",
+        "ms": 16,
+        "findings": []
+      },
+      {
+        "id": "missions",
+        "status": "pass",
+        "ms": 2208,
+        "findings": []
+      }
+    ],
+    "findings": [
+      {
+        "fingerprint": "f1m8070m",
+        "severity": "warn",
+        "area": "self-model",
+        "title": "4 stale self-knowledge memories",
+        "detail": "Memories describing OLD versions of her systems (pre self-model v1.2.0): lesson/speech-guard-drill, lesson/exact-changes-not-drafting, lesson/unique-anchors-gate-mechanics, self-modification-rule. These can make her deny systems she really has (\"I can't dream\" class).",
+        "repair_class": "auto",
+        "repair_hint": "upsert the canonical mist:self-systems memory from the current manifest"
+      }
+    ],
+    "new_findings": [
+      {
+        "fingerprint": "f1m8070m",
+        "severity": "warn",
+        "area": "self-model",
+        "title": "4 stale self-knowledge memories",
+        "detail": "Memories describing OLD versions of her systems (pre self-model v1.2.0): lesson/speech-guard-drill, lesson/exact-changes-not-drafting, lesson/unique-anchors-gate-mechanics, self-modification-rule. These can make her deny systems she really has (\"I can't dream\" class).",
+        "repair_class": "auto",
+        "repair_hint": "upsert the canonical mist:self-systems memory from the current manifest"
+      }
+    ],
+    "repairs": [
+      {
+        "finding": "4 stale self-knowledge memories",
+        "lane": "auto",
+        "outcome": "canonical mist:self-systems memory refreshed from the manifest"
+      }
+    ],
+    "summary": "1 finding(s) across 11 probes: 0 fail, 1 warn; 1 repair(s) attempted",
+    "all_green": false
+  },
+  "seen": {
+    "f1m8070m": {
+      "last_seen": "2026-10-04T21:28:29.031Z",
+      "count": 1
+    }
+  }
+}

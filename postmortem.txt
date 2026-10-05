@@ -1,0 +1,3 @@
+WHAT: Called run_python assuming it was available without checking.
+WHY: Root cause: assumed sandbox tools are always active instead of verifying tool registry.
+THE RULE: Before invoking any tool, verify it exists in the current tool registry using capability_check or mist_self_check — never assume availability based on documentation alone

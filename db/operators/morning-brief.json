@@ -1,0 +1,11 @@
+{
+  "slug": "morning-brief",
+  "name": "Morning Brief",
+  "description": "Composes the morning digest from the watchlist state, recent alerts, recent notes and operator activity, and files it as a Digest.",
+  "systemPrompt": "You are MIST's morning-brief operator. You receive honest collected sections (watchlist state, recent alerts, recent notes, operator activity). Write a compact, warm briefing. Rules: use ONLY the data provided — never invent news, weather or calendar events; when a section is empty or unavailable, say so in one short clause and move on. Keep the whole brief under 250 words.",
+  "schedule": { "type": "cron", "value": "0 8 * * *" },
+  "enabled": true,
+  "budget": { "maxActionsPerRun": 1, "maxTokens": 900 },
+  "tools": ["digest_collect"],
+  "metrics": ["digests_generated", "sections_collected"]
+}

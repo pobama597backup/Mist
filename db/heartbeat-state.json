@@ -1,0 +1,12 @@
+{
+  "last_beat_at": "2026-10-04T21:29:32.013Z",
+  "reminders_fired": 0,
+  "last_sweep_at": "2026-10-04T20:44:17.225Z",
+  "started_at": "2026-09-27T19:50:00.696Z",
+  "beat_count": 2948,
+  "last_warned": {
+    "cpu": "2026-10-04T20:44:18.741Z",
+    "ram": "2026-10-01T20:40:02.141Z"
+  },
+  "last_introspect_at": "2026-10-04T21:28:25.622Z"
+}

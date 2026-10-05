@@ -1,0 +1,29 @@
+{
+  "latest_version": "2026.9.8",
+  "checked_at": "2026-10-05T20:51:25.940Z",
+  "last_sync_at": "2026-10-05T20:51:25.940Z",
+  "last_changed_at": "2026-10-05T06:19:04.700Z",
+  "last_error": null,
+  "history": [
+    {
+      "version": "2026.9.8",
+      "seen_at": "2026-10-05T06:19:04.700Z",
+      "notes_excerpt": "2026.9.8 v2026.9.8 For formatted release notes, read this release on the docs site. OpenClaw 2026.9.8 fixes missing replies between agents, reduces memory use when running many Codex agents, and addresses failed updates and Windows startup problems. Release scale: 43 pull requests, 12 direct commits, and 8 contributors. Web UI - Browser tabs after updates. If you leave OpenClaw's bundled web inter"
+    },
+    {
+      "version": "2026.9.7",
+      "seen_at": "2026-09-30T08:25:16.745Z",
+      "notes_excerpt": "2026.9.7 v2026.9.7 For formatted release notes, read this release on the docs site. OpenClaw 2026.9.7 is snappier under load and smoother in long conversations, with better update backups and rollback protection, plus fixes for upgrading from 2026.9.5. It also adds OpenAI’s Agents API and Sign in with ChatGPT (Beta), alongside better chat on Mac, iPhone and iPad, and help picking up work after a r"
+    },
+    {
+      "version": "2026.9.6",
+      "seen_at": "2026-09-24T08:15:24.034Z",
+      "notes_excerpt": "2026.9.6 v2026.9.6 For formatted release notes, read this release on the docs site. OpenClaw 2026.9.6 brings clearer managed-update outcomes, recovery for unfinished work after restarts, and complete 30-day Usage reporting. A GitHub reader brings public discussions and diffs beside chat, while remote workspaces gain Files, Memory, and Skills and meeting notes update as capture continues. Optional "
+    },
+    {
+      "version": "2026.9.5",
+      "seen_at": "2026-09-23T00:13:54.821Z",
+      "notes_excerpt": "2026.9.5 v2026.9.5 Reading formats: Release notes for readers · Plain Markdown for AI agents and tools. OpenClaw 2026.9.5 brings Atomic Updates that check the next version before switching over, plugins you can install without restarting your Gateway, conversations you can share, GPT Live in your meetings and phone calls, browser pages you can work on alongside your agent, conversation archives yo"
+    }
+  ]
+}

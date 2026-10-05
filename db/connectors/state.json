@@ -1,0 +1,27 @@
+{
+  "notes": {
+    "lastSyncAt": "2026-09-29T20:07:15.868Z",
+    "lastNote": "ingested 34 note(s)"
+  },
+  "hackernews": {
+    "lastSyncAt": "2026-09-29T20:36:23.593Z",
+    "lastNote": "top 5 Hacker News stories (public firebase API, no auth)",
+    "lastSyncOk": true
+  },
+  "github": {
+    "lastSyncAt": "2026-09-29T20:09:58.030Z",
+    "lastNote": "github sync failed: HTTP 403 (rate limited)",
+    "config": {
+      "owner": "vercel",
+      "repo": "next.js"
+    }
+  },
+  "gmail": {
+    "lastSyncAt": "2026-09-29T20:09:47.827Z",
+    "lastNote": "Gmail requires external credentials that are not configured in this deployment — sync refused honestly (no fake connection)"
+  },
+  "obsidian": {
+    "lastSyncAt": "2026-09-29T20:09:47.693Z",
+    "lastNote": "ingested 9 vault note(s)"
+  }
+}

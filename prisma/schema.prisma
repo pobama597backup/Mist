@@ -1,0 +1,442 @@
+// M.I.S.T. UNIFIED — sovereign local-first AI companion
+// SQLite data store (WAL). Adapted from spec 3.4 for Prisma.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  title     String    @default("New thread")
+  createdAt DateTime  @default(now())
+  messages  Message[]
+
+  @@index([createdAt])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  role           String // user | assistant | system
+  content        String
+  provider       String? // provider badge: which brain served this
+  model          String?
+  fallback       Boolean      @default(false)
+  meta           String       @default("{}") // v2 JSON: citations/attachments/suggestions/capability_request
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+model LongtermMemory {
+  key       String   @id
+  value     String
+  trust     String   @default("auto") // auto | trusted | untrusted (quarantined — blocked from prompts; OpenJarvis trust tiers)
+  createdAt DateTime @default(now())
+}
+
+model MemoryQueue {
+  id        String    @id @default(cuid())
+  content   String
+  kind      String    @default("staged") // staged | reminder | note
+  status    String    @default("pending") // pending | fired | done
+  dueAt     DateTime? // when set (kind=reminder), the 60s heartbeat fires it into chat
+  firedAt   DateTime?
+  createdAt DateTime  @default(now())
+}
+
+// v4 heartbeat — proactive alerts delivered into the chat (⏰ reminders, 📦 releases)
+model Alert {
+  id             String    @id @default(cuid())
+  kind           String // reminder | release | system
+  title          String
+  body           String    @default("")
+  status         String    @default("pending") // pending | delivered
+  meta           String    @default("{}") // JSON: repo, version, source queue id, …
+  conversationId String? // thread the alert was appended to (null = toast-only)
+  createdAt      DateTime  @default(now())
+  deliveredAt    DateTime?
+
+  @@index([status, createdAt])
+}
+
+model VectorMemory {
+  id        String   @id @default(cuid())
+  text      String
+  source    String   @default("conversation") // conversation | fact | skill | note
+  metadata  String   @default("{}") // JSON string
+  createdAt DateTime @default(now())
+}
+
+model Skill {
+  id         String   @id @default(cuid())
+  name       String   @unique
+  trigger    String
+  steps      String   @default("")
+  toolChain  String   @default("[]") // JSON string array
+  notes      String   @default("")
+  uses       Int      @default(0)
+  origin     String   @default("user") // user | auto (v5 learning loop)
+  version    Int      @default(1) // bumped every auto-refinement
+  confidence Float    @default(0) // LLM confidence when auto-created (0-1)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+// skill execution ledger — every skill run, success or failure
+model SkillExecution {
+  id         String   @id @default(cuid())
+  skill_name String
+  input      String?
+  output     String   @default("{}") // JSON string
+  success    Boolean  @default(true)
+  error      String?
+  timestamp  DateTime @default(now())
+
+  @@index([skill_name])
+  @@index([timestamp])
+}
+
+// v3 self-evolution — MIST codes itself behind approval gates
+model EvolutionProposal {
+  id          String    @id @default(cuid())
+  kind        String // feature | fix | suggestion
+  title       String
+  summary     String
+  rationale   String
+  status      String    @default("pending") // pending | applied | rejected | rolled_back | failed
+  origin      String    @default("self") // self-audit | self-idea | openclaw | user
+  changes     String    @default("[]") // JSON EvolutionChange[]
+  targetFiles String    @default("[]") // JSON string[] — for not-yet-developed suggestions
+  lintOutput  String?
+  error       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  appliedAt   DateTime?
+
+  @@index([status, createdAt])
+}
+
+// v5 autonomy — Hermes-style scheduled automations in natural language.
+// The scheduler-service executes due jobs through the unified LLM loop and
+// delivers results as alerts (which land in the alerts thread).
+model CronJob {
+  id          String    @id @default(cuid())
+  name        String // short human label, e.g. "Morning briefing"
+  prompt      String // what MIST should do when it fires (natural language)
+  kind        String    @default("cron") // cron | fixed_rate | one_time
+  expr        String    @default("") // 5-field cron expression (kind=cron)
+  intervalMin Int       @default(0) // minutes (kind=fixed_rate)
+  runAt       DateTime? // target instant (kind=one_time)
+  timezone    String    @default("Africa/Lagos")
+  delivery    String    @default("alert") // alert | silent
+  enabled     Boolean   @default(true)
+  lastRunAt   DateTime?
+  nextRunAt   DateTime?
+  lastStatus  String? // ok | error | skipped
+  lastResult  String    @default("") // trimmed result summary
+  runCount    Int       @default(0)
+  origin      String    @default("user") // user | auto (seeded by MIST herself)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([enabled, nextRunAt])
+}
+
+// v5 autonomy ledger — every autonomous action MIST takes on her own
+// (skill auto-creation, skill refinement, memory curation, user-model
+// rebuilds, self-reviews, trend digests, upgrade proposals, cron runs)
+model AutonomyEvent {
+  id        String   @id @default(cuid())
+  type      String // skill_created | skill_refined | memory_curated | user_model_updated | self_review | trend_digest | upgrade_proposed | cron_run | vault_event
+  summary   String
+  meta      String   @default("{}") // JSON string
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([type, createdAt])
+}
+
+// v6 sub-agents — specialized workers under MIST's command. She is the
+// orchestrator; each agent is a role-scoped brain (own system prompt) that
+// can run tasks with a subset of her tools. Everything is recorded for the
+// human in the loop (AgentRun rows + activity feed).
+model SubAgent {
+  id          String   @id @default(cuid())
+  name        String // short label, e.g. "Marketing"
+  role        String // marketing | information | research | ops | custom
+  description String   @default("") // what this agent is for (user-facing)
+  systemPrompt String  @default("") // role brain — injected as the agent's persona
+  status      String   @default("active") // active | paused
+  runCount    Int      @default(0)
+  lastRunAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  runs AgentRun[]
+
+  @@index([status, updatedAt])
+}
+
+// one delegated task execution by a sub-agent — the human-in-the-loop record
+model AgentRun {
+  id          String   @id @default(cuid())
+  agentId     String
+  agent       SubAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  goal        String // natural-language task given to the agent
+  status      String   @default("queued") // queued | running | done | failed
+  result      String   @default("") // final answer / summary
+  error       String? // failure reason (status=failed) — human-in-the-loop visibility
+  log         String   @default("[]") // JSON steps: [{tool, args, at, ok, output?}]
+  toolsUsed   String   @default("[]") // JSON string[]
+  triggeredBy String   @default("user") // user | mist | scheduler
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  durationMs  Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@index([agentId, createdAt])
+  @@index([status, createdAt])
+}
+
+// v7 mission engine — persistent multi-step autonomous task execution.
+// A Mission is a goal-driven agent loop OUTSIDE the chat turn: plan (decompose
+// with the tool catalog) → act (brain picks one tool call per cycle, result
+// feeds back) → verify (skeptical pass against success criteria) → report
+// (alert lands in chat). Transcript persisted after every step → crash-safe;
+// the heartbeat resumes interrupted missions and starts queued ones.
+model Mission {
+  id           String    @id @default(cuid())
+  goal         String // natural-language objective
+  title        String    @default("") // short label (planner sets it)
+  status       String    @default("queued") // queued | planning | running | paused | awaiting_creator | done | failed | cancelled
+  origin       String    @default("user") // user | mist | scheduler | subagent
+  agentId      String? // optional SubAgent link (mission runs as that agent)
+  persona      String    @default("") // optional role brain override (sub-agent persona)
+  plan         String    @default("{}") // JSON: {title, steps[], success_criteria[]}
+  transcript   String    @default("[]") // JSON step records [{i, tool, args, ok, summary, at}]
+  capabilityGaps String  @default("[]") // JSON string[] — missing abilities cataloged for the evolution queue
+  stepsUsed    Int       @default(0)
+  maxSteps     Int       @default(40)
+  maxMinutes   Int       @default(15)
+  failures     Int       @default(0) // consecutive failures (reset on success)
+  result       String    @default("") // final factual report
+  verification String    @default("{}") // JSON: {achieved, score, confidence, reasoning, gaps[]}
+  provider     String? // which brain served the mission (core/openrouter/…)
+  error        String?
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([status, createdAt])
+}
+
+// mission lessons ledger — the no-repeat-mistakes enforcement. After every
+// mission ends, the run is distilled into durable lessons (what failed and
+// why); every future mission's PLANNER and ACTOR prompts carry the most
+// relevant lessons, so a mistake made once is never paid for twice.
+model MissionLesson {
+  id              String   @id @default(cuid())
+  lesson          String // imperative, specific, durable ("keep patch payloads under ~15 lines")
+  kind            String   @default("general") // payload | reads | tool-use | verification | planning | general
+  originMissionId String? // the run that taught it
+  originGoal      String   @default("") // short goal context for relevance ranking
+  outcome         String   @default("") // mission outcome when learned (done/failed/…)
+  timesSeen       Int      @default(1) // reinforced when re-learned (dedup signal)
+  active          Boolean  @default(true) // soft-retired lessons stop riding prompts
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([active, updatedAt])
+}
+
+// a composed dream — Mist's inner-life narrative, generated from her memories,
+// user model and aspirations during dream cycles (nightly review, or on request)
+model Dream {
+  id        String   @id @default(cuid())
+  content   String // the dream narrative (markdown)
+  kind      String   @default("nightly") // nightly | requested | idle
+  mood      String   @default("calm") // her emotional tone during the dream
+  sources   String   @default("[]") // JSON: what fed it — memory keys, topics, events
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([kind, createdAt])
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// OpenJarvis integration layer (ported from open-jarvis/OpenJarvis @ 5e5f5ef)
+// Reference clone: /home/z/OpenJarvis (do not modify; dissect-only)
+// ═══════════════════════════════════════════════════════════════════════
+
+// Trace store — the learning substrate (port of openjarvis/traces/store.py).
+// Every chat turn, mission, operator tick, tool loop → typed steps that power
+// the Traces viewer, learned routing, skill optimization and personal benchmarks.
+model Trace {
+  id          String    @id @default(cuid())
+  query       String
+  agent       String    @default("chat") // chat | mission | operator | subagent | research | voice | digest
+  model       String?
+  provider    String?
+  result      String    @default("")
+  outcome     String    @default("running") // running | success | failure | degraded
+  feedback    Float? // post-hoc 0..1 score (user thumbs or LLM judge)
+  tokensIn    Int       @default(0)
+  tokensOut   Int       @default(0)
+  latencyMs   Int       @default(0)
+  costUsd     Float     @default(0)
+  complexity  Float     @default(0) // 0..1 complexity score (openjarvis learning/routing/complexity.py)
+  tier        String    @default("") // trivial | simple | moderate | complex | very_complex
+  tokenBudget Int       @default(0) // tier-derived budget the router assigned
+  meta        String    @default("{}") // JSON: conversationId, missionId, operator, finishReason…
+  startedAt   DateTime  @default(now())
+  endedAt     DateTime?
+  createdAt   DateTime  @default(now())
+
+  steps TraceStep[]
+
+  @@index([agent, createdAt])
+  @@index([outcome, createdAt])
+}
+
+model TraceStep {
+  id         String   @id @default(cuid())
+  traceId    String
+  trace      Trace    @relation(fields: [traceId], references: [id], onDelete: Cascade)
+  idx        Int
+  type       String // route | retrieve | generate | tool_call | respond
+  name       String   @default("") // tool name / model name
+  input      String   @default("{}")
+  output     String   @default("{}")
+  ok         Boolean  @default(true)
+  durationMs Int      @default(0)
+  tokens     Int      @default(0)
+  meta       String   @default("{}") // skill tags, finish reason, provider attempts…
+  createdAt  DateTime @default(now())
+
+  @@index([traceId, idx])
+}
+
+// Knowledge store (port of openjarvis/connectors KnowledgeStore) — ingested
+// personal knowledge chunks searched by hybrid BM25+vector with RRF fusion.
+model KnowledgeChunk {
+  id          String   @id @default(cuid())
+  source      String // upload | obsidian | notes | github | research | web
+  sourceId    String   @default("") // file path / url / repo
+  docType     String   @default("document") // document | note | research | web | vault
+  title       String   @default("")
+  chunkIdx    Int      @default(0)
+  content     String
+  meta        String   @default("{}") // author, url, ingestedAt, threadId, contentHash…
+  createdAt   DateTime @default(now())
+
+  @@index([source, createdAt])
+}
+
+// Tiered approval queue (port of openjarvis proactive approval suite +
+// the ApprovalBell pattern) — agent-proposed actions awaiting the creator.
+model Approval {
+  id          String    @id @default(cuid())
+  actionType  String // tool_exec | file_write | spend | skill_install | operator_enable
+  fingerprint String // "{action_type}:{key}" — matches PermissionMemory
+  title       String
+  payload     String    @default("{}")
+  tier        String    @default("medium") // trivial | low | medium | high
+  status      String    @default("pending") // pending | approved | denied | expired
+  origin      String    @default("mist") // mist | operator | mission | subagent
+  decidedBy   String?
+  createdAt   DateTime  @default(now())
+  decidedAt   DateTime?
+
+  @@index([status, createdAt])
+}
+
+// Remembered consent (port of openjarvis approval_store.py) — "always yes for
+// X" / "never for Y" per action fingerprint, so she never asks twice.
+model PermissionMemory {
+  id          String   @id @default(cuid())
+  fingerprint String   @unique
+  decision    String // always_approve | always_deny
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Operators — persistent scheduled agents driven by manifests (port of
+// openjarvis/operators: researcher, news_digest, system_monitor, …).
+model Operator {
+  id         String    @id @default(cuid())
+  slug       String    @unique
+  name       String
+  manifest   String    @default("{}") // JSON: {systemPrompt, tools[], schedule{type,value}, metrics[]}
+  status     String    @default("active") // active | paused
+  stateKey   String    @default("") // longterm-memory key "operator:{slug}:state"
+  lastRunAt  DateTime?
+  lastStatus String?
+  runCount   Int       @default(0)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([status])
+}
+
+// Digest history (port of openjarvis morning digest) — sectioned briefings
+// generated from her own sources, with optional TTS audio artifact.
+model Digest {
+  id        String   @id @default(cuid())
+  kind      String   @default("daily") // daily | on_demand
+  sections  String   @default("{}") // JSON: {sectionKey: {title, content, sources[]}}
+  content   String   @default("") // full markdown
+  audioPath String? // path under db/digest/ when spoken
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// w3 speed — instant replies: normalized prompt → her chosen reply text.
+// Canned smalltalk lives in code (fast-path.ts); this table caches what the
+// cascade actually answered for a repeated simple prompt so the SECOND ask
+// is milliseconds (Mark-LV measured-ladder philosophy: never pay twice).
+model FastReply {
+  id        String   @id @default(cuid())
+  cacheKey  String   @unique // sha256(normalized prompt)
+  prompt    String // the raw prompt that seeded it (human-readable audit)
+  text      String // her reply — replayed verbatim on cache hit
+  kind      String   @default("cached") // smalltalk | status | cached
+  hits      Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// w3 speed — spoken audio cache: sha256(engine|voice|speed|text) → wav bytes.
+// Turns a cache-hit reply into instant VOICE, not just instant text.
+model SpokenCache {
+  id        String   @id @default(cuid())
+  hash      String   @unique
+  bytes     Bytes // wav audio
+  size      Int
+  createdAt DateTime @default(now())
+}
+
+// w3 notify — the teacher's Mark-LV updates, translated by Clare into a
+// message for the creator: what changed, her honest opinion, and the
+// question "would this be useful?" — answered with wanted / dismissed.
+model TeacherNotice {
+  id        String   @id @default(cuid())
+  head      String // mark-lv head sha the update landed on
+  commits   Int
+  digest    String   @default("{}") // JSON: [{sha, subject, files[]}]
+  message   String // Clare's words to the creator (what changed + the ask)
+  opinion   String   @default("") // her honest take on usefulness for M.I.S.T.
+  status    String   @default("new") // new | wanted | dismissed
+  seenAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([status, createdAt])
+}

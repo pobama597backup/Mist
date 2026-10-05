@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<!--
+  M.I.S.T. — VISAGE  ·  w3-mouth
+  Her own face. Clean-room M.I.S.T. code (no ai-visualizer engine, no
+  external deps, no build step) — an abstract dark-glass face whose MOUTH
+  articulates in sync with her real voice.
+
+  The mouth physics is the teacher's (Mark-LV, core/avatar.py), ported:
+    TAU_OPEN  0.022s  jaw dropping toward a vowel
+    TAU_SHUT  0.012s  lips closing on a consonant, mid-word
+    TAU_REST  0.055s  settling back to rest after speech ends
+    TAU_SHAPE 0.018s  viseme shape following the schedule
+  driven frame-rate-independently (rate = 1 - exp(-dt/tau)) by LIVE formant
+  frames (F1/F2/hiss bands) computed in the parent app from the shared
+  audio analyser and shipped on the face bus /state contract as `mouth`.
+
+  Bus contract (same-origin parent): poll window.__mistBus.state() every
+  animation frame, window.__mistBus.config() for the name/badge. Opened
+  standalone (no parent bus) the face rests in a gentle idle demo.
+
+  Keys: F = fullscreen (the exit affordance below appears in fullscreen).
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M.I.S.T. — Visage</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;background:#020617;overflow:hidden}
+  canvas#stage{position:fixed;inset:0;width:100vw;height:100vh;display:block}
+  html:fullscreen{cursor:none}
+</style>
+</head>
+<body>
+<canvas id="stage" role="img" aria-label="M.I.S.T. — an abstract face whose eyes and lips follow her voice state"></canvas>
+<script>
+"use strict";
+/* ============================================================
+   VISAGE — the mouth-tracking face
+   ------------------------------------------------------------
+   Design language: dark glass (slate-950 vignette), thin
+   luminous teal strokes for the eyes, warm champagne-amber for
+   the lips, hairline instrument arcs framing the composition.
+   Everything glows via layered strokes + pre-blurred radial
+   gradients — never per-frame filter blur, never CSS blend
+   modes (Chrome compositing stays calm). One canvas, one rAF
+   loop, dt-based physics, paused when hidden, DPR-aware.
+   ============================================================ */
+
+const canvas = document.getElementById("stage");
+const g = canvas.getContext("2d");
+
+/* ---------------- bus (same-origin parent, if embedded) ---------- */
+let bus = null;
+try {
+  bus = window.parent && window.parent.__mistBus ? window.parent.__mistBus : null;
+} catch (e) { /* cross-origin — standalone */ }
+
+let busState = "idle";     // idle | listening | thinking | speaking
+let busLevel = 0;          // 0..1 voice level from the waveform samples
+let busAlert = false;
+let mouthFrame = null;     // {openness, width, closure} while speaking
+let cfgName = "MIST";
+let cfgBadge = "";
+let cfgTick = 0;
+
+function pollBus() {
+  if (!bus) return;
+  try {
+    const st = bus.state();
+    busState = st && st.state ? st.state : "idle";
+    busLevel = st && typeof st.level === "number" ? st.level : 0;
+    busAlert = !!(st && st.alert);
+    mouthFrame = st && st.mouth ? st.mouth : null;
+    if ((cfgTick++ % 90) === 0) {
+      const c = bus.config();
+      if (c) { cfgName = String(c.name || "MIST"); cfgBadge = String(c.badge || ""); }
+    }
+  } catch (e) { bus = null; busState = "idle"; mouthFrame = null; }
+}
+
+/* ---------------- layout / DPR ---------------------------------- */
+let W = 0, H = 0, S = 0, CX = 0, CY = 0, DPR = 1;
+let bgGrad = null, auraGrad = null, fieldGrad = null;
+
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  S = Math.min(W, H); CX = W / 2; CY = H / 2;
+  // vignette: one soft center glow into deep slate-950 (cached — no per-frame cost)
+  bgGrad = g.createRadialGradient(CX, CY * 0.92, S * 0.05, CX, CY * 0.92, Math.max(W, H) * 0.72);
+  bgGrad.addColorStop(0, "#0a1220");
+  bgGrad.addColorStop(0.55, "#030a18");
+  bgGrad.addColorStop(1, "#01040c");
+  // the breathing aura behind the face (pre-blurred radial gradient)
+  auraGrad = g.createRadialGradient(CX, CY - S * 0.02, S * 0.02, CX, CY - S * 0.02, S * 0.34);
+  auraGrad.addColorStop(0, "rgba(45,212,191,0.16)");
+  auraGrad.addColorStop(0.55, "rgba(45,212,191,0.05)");
+  auraGrad.addColorStop(1, "rgba(45,212,191,0)");
+  // faint inner field directly behind the features
+  fieldGrad = g.createRadialGradient(CX, CY - S * 0.01, S * 0.01, CX, CY - S * 0.01, S * 0.20);
+  fieldGrad.addColorStop(0, "rgba(45,212,191,0.07)");
+  fieldGrad.addColorStop(1, "rgba(45,212,191,0)");
+}
+addEventListener("resize", resize);
+resize();
+
+/* ---------------- palette --------------------------------------- */
+const TEAL = [45, 212, 191];
+const TEAL_BRIGHT = [153, 246, 228];
+const AMBER = [245, 158, 11];
+const AMBER_SOFT = [252, 211, 77];
+const WARM_CORE = [253, 246, 227];
+const RED = [239, 68, 68];
+const rgba = (c, a) => "rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + a + ")";
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+let reducedMotion = false;
+try { reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) {}
+const MOTION = reducedMotion ? 0.4 : 1.0;
+
+/* ---------------- the teacher's mouth physics ------------------- */
+const TAU_OPEN = 0.022;   // jaw dropping toward a vowel
+const TAU_SHUT = 0.012;   // lips closing on a consonant, mid-word
+const TAU_REST = 0.055;   // settling back to rest after speech ends
+const TAU_SHAPE = 0.018;  // viseme shape following the schedule
+const rate = (dt, tau) => 1 - Math.exp(-dt / tau);
+
+let shapeO = 0;   // viseme openness (shape stage)
+let shapeW = 0;   // lip spread -1..1 (shape stage)
+let jaw = 0;      // the jaw 0..1 (open/shut stage)
+let press = 0;    // bilabial emphasis 0..1 (closure frames press the lips)
+
+function mouthStep(dt, speaking) {
+  const tgtO = speaking && mouthFrame && !mouthFrame.closure ? mouthFrame.openness : 0;
+  const tgtW = speaking && mouthFrame ? mouthFrame.width : 0;
+  // shape stage — the viseme follows the schedule
+  shapeO += (tgtO - shapeO) * rate(dt, TAU_SHAPE);
+  shapeW += (tgtW - shapeW) * rate(dt, TAU_SHAPE);
+  // jaw stage — open fast, shut FASTER (a single 20ms bilabial must land),
+  // and only the return to rest is leisurely
+  const tgtJ = speaking ? shapeO : 0;
+  const tau = tgtJ > jaw ? TAU_OPEN : (speaking ? TAU_SHUT : TAU_REST);
+  jaw += (tgtJ - jaw) * rate(dt, tau);
+  if (jaw < 0.002) jaw = 0;
+  // closure frames press the lips fully — p/b/m must read as speech
+  const tgtP = speaking && mouthFrame && mouthFrame.closure ? 1 : 0;
+  press += (tgtP - press) * rate(dt, 0.03);
+}
+
+/* ---------------- eyes: gaze, blink, saccades -------------------- */
+const EYE = {
+  idle:      { open: 1.00, glow: 0.55, wander: 0.020, blink: [3.0, 7.0] },
+  listening: { open: 1.10, glow: 0.74, wander: 0.006, blink: [2.5, 6.0] },
+  thinking:  { open: 0.94, glow: 0.66, wander: 0.010, blink: [1.4, 3.2] },
+  speaking:  { open: 1.02, glow: 0.88, wander: 0.010, blink: [2.2, 5.0] },
+};
+const eyeProfile = () => EYE[busState] || EYE.idle;
+
+let gazeX = 0, gazeY = 0;             // smoothed gaze (fractions of S)
+let lookSide = -1, lookSwitchAt = 0;  // thinking: up-and-away, alternating sides
+let blinkAt = 2.2, blinkT0 = -1;      // blink scheduling
+let saccAt = 0.6, saccX = 0, saccY = 0; // micro-saccades
+
+function eyesStep(dt, t) {
+  const p = eyeProfile();
+
+  // --- gaze target per state ---
+  let tx = 0, ty = 0;
+  const wob = (f, ph) => MOTION * p.wander * Math.sin(t * f + ph);
+  if (busState === "thinking") {
+    // she's looking at the problem — up and away, alternating sides
+    if (t > lookSwitchAt) { lookSide = Math.random() < 0.5 ? -1 : 1; lookSwitchAt = t + 1.8 + Math.random() * 2.2; }
+    tx = lookSide * (0.028 + 0.006 * Math.sin(t * 0.7));
+    ty = -0.020 - 0.006 * Math.sin(t * 0.53 + 1.2);
+  } else if (busState === "listening") {
+    // attention on you — centered, steady
+    tx = wob(0.31, 0.4) * 0.35; ty = 0.003 + wob(0.24, 2.0) * 0.3;
+  } else if (busState === "speaking") {
+    // warm centered with a subtle lift
+    tx = wob(0.36, 1.1) * 0.5; ty = -0.004 + wob(0.27, 0.7) * 0.4;
+  } else {
+    // idle — slow gentle wander
+    tx = 0.022 * Math.sin(t * 0.31) + 0.012 * Math.sin(t * 0.13 + 1.7);
+    ty = 0.012 * Math.sin(t * 0.23 + 0.5) + 0.006 * Math.sin(t * 0.41 + 2.2);
+    tx *= MOTION; ty *= MOTION;
+  }
+  gazeX += (tx - gazeX) * rate(dt, 0.30);
+  gazeY += (ty - gazeY) * rate(dt, 0.30);
+
+  // --- micro-saccades: tiny 1-2px darts every ~800ms ---
+  if (t > saccAt) {
+    saccX = (Math.random() - 0.5) * 0.012 * MOTION;
+    saccY = (Math.random() - 0.5) * 0.008 * MOTION;
+    saccAt = t + 0.55 + Math.random() * 0.55;
+  }
+  saccX += (0 - saccX) * rate(dt, 0.22);
+  saccY += (0 - saccY) * rate(dt, 0.22);
+
+  // --- blinks: natural random, faster while thinking ---
+  if (blinkT0 < 0 && t > blinkAt) blinkT0 = t;
+  if (blinkT0 >= 0) {
+    const bt = (t - blinkT0) / 0.15; // 150ms full blink
+    if (bt >= 1) {
+      blinkT0 = -1;
+      // occasional double-blink
+      blinkAt = t + (Math.random() < 0.1 ? 0.28 : p.blink[0] + Math.random() * (p.blink[1] - p.blink[0]));
+    }
+  }
+}
+
+/** 0..1 how open the lids are this instant (1 = open, 0 = closed). */
+function lidOpen(t) {
+  if (blinkT0 < 0) return 1;
+  const bt = (t - blinkT0) / 0.15;
+  if (bt >= 1) return 1;
+  if (bt < 0.42) { const k = bt / 0.42; return 1 - k * k; }  // ease-in close
+  const k = (bt - 0.42) / 0.58; return k * (2 - k);          // ease-out open
+}
+
+/* ---------------- drawing helpers -------------------------------- */
+function glowStroke(path, passes) {
+  for (const pass of passes) {
+    g.globalCompositeOperation = pass[3] ? "lighter" : "source-over";
+    g.lineWidth = pass[0]; g.strokeStyle = rgba(pass[1], pass[2]);
+    g.stroke(path);
+  }
+  g.globalCompositeOperation = "source-over";
+}
+
+/* ---------------- the eyes --------------------------------------- */
+function drawEye(ex, ey, t) {
+  const p = eyeProfile();
+  const open = lidOpen(t) * p.open;
+  const left = ex < CX;
+  if (open <= 0.02) { // fully closed — a single soft lash line
+    const lash = new Path2D();
+    lash.moveTo(ex - (left ? -1 : 1) * S * 0.085, ey + S * 0.001);
+    lash.quadraticCurveTo(ex, ey + S * 0.011, ex + (left ? -1 : 1) * S * 0.085, ey + S * 0.001);
+    glowStroke(lash, [
+      [S * 0.0050, TEAL, 0.10, true],
+      [S * 0.0016, TEAL_BRIGHT, 0.55, false],
+    ]);
+    return;
+  }
+
+  const ew = S * 0.085;                    // half-width of the almond
+  const eh = S * 0.050 * open;             // half-height (the blink collapses it)
+  const tilt = S * 0.007;                  // gentle canthal lift at the outer corner
+  const outer = ex + (left ? -ew : ew);
+  const inner = ex + (left ? ew : -ew);
+  const oy = ey - tilt * 0.5, iy = ey + tilt * 0.5;
+
+  // the almond: two beziers meeting at the corners
+  const almond = new Path2D();
+  almond.moveTo(inner, iy);
+  almond.bezierCurveTo(inner + (outer - inner) * 0.25, ey - eh * 1.35,
+                       inner + (outer - inner) * 0.75, ey - eh * 1.35, outer, oy);
+  almond.bezierCurveTo(outer + (inner - outer) * 0.25, ey + eh * 0.95,
+                       outer + (inner - outer) * 0.75, ey + eh * 0.95, inner, iy);
+
+  // where she looks — the gaze light under the lids
+  const px = ex + (gazeX + saccX) * S;
+  const py = ey + (gazeY + saccY) * S * 0.6;
+
+  g.save();
+  g.clip(almond);
+  // soft inner glow (warms while she speaks)
+  const glowR = ew * 1.35;
+  const glow = g.createRadialGradient(px, py, 0, px, py, glowR);
+  const gc = mix(TEAL, AMBER, busState === "speaking" ? 0.25 : 0);
+  glow.addColorStop(0, rgba(gc, 0.20 * p.glow + 0.12));
+  glow.addColorStop(1, rgba(gc, 0));
+  g.fillStyle = glow;
+  g.fillRect(ex - ew * 1.4, ey - eh * 1.6, ew * 2.8, eh * 3.2);
+  // the gaze light — a soft luminous point that darts with the saccades
+  const pr = S * 0.014;
+  const pup = g.createRadialGradient(px, py, 0, px, py, pr);
+  pup.addColorStop(0, rgba(mix(TEAL_BRIGHT, WARM_CORE, 0.3), 0.55 * p.glow + 0.20));
+  pup.addColorStop(0.4, rgba(TEAL, 0.22 * p.glow + 0.05));
+  pup.addColorStop(1, rgba(TEAL, 0));
+  g.fillStyle = pup;
+  g.fillRect(px - pr, py - pr, pr * 2, pr * 2);
+  g.fillStyle = rgba(WARM_CORE, 0.85 * p.glow + 0.10);
+  g.beginPath();
+  g.arc(px, py, S * 0.0038, 0, Math.PI * 2);
+  g.fill();
+  g.restore();
+
+  // luminous stroke — layered widths, additive glow, crisp core
+  const strokeCol = mix(mix(TEAL, TEAL_BRIGHT, 0.5), RED, alertMix);
+  glowStroke(almond, [
+    [S * 0.0060, TEAL, 0.07 * p.glow + 0.03, true],
+    [S * 0.0028, TEAL, 0.17 * p.glow + 0.05, true],
+    [S * 0.0013, strokeCol, 0.55 + 0.35 * p.glow, false],
+  ]);
+}
+
+/* ---------------- the mouth --------------------------------------
+   A sculpted pair of lips: two bezier paths that morph. Openness
+   drives the jaw (upper lip rises ~24%, lower lip drops ~76%),
+   width drives spread/purse, closure presses them fully. Inside:
+   a dark warm gradient, a teeth hint strip under the upper lip,
+   and a soft throat glow deep below.                                  */
+function drawMouth(t) {
+  const mx = CX;
+  const breath = Math.sin(t * (Math.PI * 2) / 4.2) * Math.max(0.9, S * 0.0014) * MOTION; // ±1px, 4s cycle
+  const my = CY + S * 0.135 + breath;
+
+  const gap = jaw * S * 0.075;                                   // total opening
+  const up = gap * 0.24;                                         // upper lip rise
+  const dn = gap * 0.76;                                         // the jaw drop
+  const spread = shapeW;                                         // -1 purse .. +1 spread
+  const chw = S * 0.135 * (1 + 0.12 * spread);                   // corner half-width
+  const cb = S * 0.015 * (1 - 0.55 * jaw) * (1 - 0.45 * press);  // cupid's bow depth
+  const ll = S * 0.016 * (1 - 0.25 * jaw) * (1 - 0.55 * press)
+           * (1 - 0.25 * Math.max(0, -spread));                  // lower lip fullness
+  const cy0 = my + S * 0.004 * jaw;                              // the corner line
+
+  // upper lip: corner → left peak → cupid dip → right peak → corner
+  const upper = new Path2D();
+  upper.moveTo(mx - chw, cy0);
+  upper.bezierCurveTo(mx - chw * 0.62, cy0 - up * 0.35 - cb * 0.28,
+                      mx - chw * 0.60, cy0 - up - cb * 0.96,
+                      mx - chw * 0.30, cy0 - up - cb * 0.90);
+  upper.bezierCurveTo(mx - chw * 0.10, cy0 - up - cb * 0.62,
+                      mx - chw * 0.06, cy0 - up - cb * 0.20,
+                      mx,         cy0 - up - cb * 0.34);
+  upper.bezierCurveTo(mx + chw * 0.06, cy0 - up - cb * 0.20,
+                      mx + chw * 0.10, cy0 - up - cb * 0.62,
+                      mx + chw * 0.30, cy0 - up - cb * 0.90);
+  upper.bezierCurveTo(mx + chw * 0.60, cy0 - up - cb * 0.96,
+                      mx + chw * 0.62, cy0 - up * 0.35 - cb * 0.28,
+                      mx + chw, cy0);
+
+  // lower lip: corner → deep soft curve → corner
+  const lower = new Path2D();
+  lower.moveTo(mx + chw, cy0);
+  lower.bezierCurveTo(mx + chw * 0.70, cy0 + dn * 0.30 + ll * 0.55,
+                      mx + chw * 0.60, cy0 + dn + ll * 1.05,
+                      mx,         cy0 + dn + ll);
+  lower.bezierCurveTo(mx - chw * 0.60, cy0 + dn + ll * 1.05,
+                      mx - chw * 0.70, cy0 + dn * 0.30 + ll * 0.55,
+                      mx - chw, cy0);
+
+  // the inner mouth (closed region between the lips)
+  const inner = new Path2D();
+  inner.addPath(upper);
+  inner.addPath(lower);
+
+  if (jaw > 0.003) {
+    g.save();
+    g.clip(inner);
+    // dark warm depth
+    const depth = g.createLinearGradient(0, cy0 - up - cb, 0, cy0 + dn + ll);
+    depth.addColorStop(0, "rgba(26,15,13,0.94)");
+    depth.addColorStop(0.6, "rgba(14,8,8,0.96)");
+    depth.addColorStop(1, "rgba(6,3,4,0.98)");
+    g.fillStyle = depth;
+    g.fillRect(mx - chw * 1.2, cy0 - up - cb * 1.6, chw * 2.4, dn + ll * 2.2 + up + cb * 2.0);
+    // teeth hint — a soft strip just under the upper lip (fades in with the jaw)
+    const teethA = Math.min(1, Math.max(0, (jaw - 0.12) / 0.4));
+    if (teethA > 0.01) {
+      const ty0 = cy0 - up - cb * 0.45;
+      const th = S * 0.016 * (0.5 + 0.5 * jaw);
+      const teeth = g.createLinearGradient(0, ty0, 0, ty0 + th);
+      teeth.addColorStop(0, rgba(WARM_CORE, 0));
+      teeth.addColorStop(0.45, rgba(WARM_CORE, 0.13 * teethA));
+      teeth.addColorStop(1, rgba(WARM_CORE, 0));
+      g.fillStyle = teeth;
+      g.fillRect(mx - chw, ty0, chw * 2, th);
+    }
+    // throat glow — warm and deep
+    const gyr = cy0 + dn * 0.62;
+    const throat = g.createRadialGradient(mx, gyr, 0, mx, gyr, chw * 0.62);
+    throat.addColorStop(0, rgba(AMBER, 0.13 * jaw));
+    throat.addColorStop(1, rgba(AMBER, 0));
+    g.fillStyle = throat;
+    g.fillRect(mx - chw, gyr - chw * 0.7, chw * 2, chw * 1.4);
+    g.restore();
+  }
+
+  // faint warm volume under the lower lip
+  const vol = g.createRadialGradient(mx, cy0 + ll * 1.1, 0, mx, cy0 + ll * 1.1, chw * 0.9);
+  vol.addColorStop(0, rgba(AMBER_SOFT, 0.045 + 0.03 * jaw));
+  vol.addColorStop(1, rgba(AMBER_SOFT, 0));
+  g.fillStyle = vol;
+  g.fillRect(mx - chw, cy0, chw * 2, ll * 3 + dn);
+
+  // luminous lips — warm champagne strokes, lower lip a touch fuller
+  const lipGlow = 0.55 + 0.45 * (busState === "speaking" ? 0.65 + 0.35 * Math.min(1, busLevel * 2) : 0.4);
+  glowStroke(upper, [
+    [S * 0.0070, AMBER, 0.08, true],
+    [S * 0.0032, AMBER_SOFT, 0.18, true],
+    [S * 0.0014, WARM_CORE, 0.50 * lipGlow + 0.25, false],
+  ]);
+  glowStroke(lower, [
+    [S * 0.0085, AMBER, 0.09, true],
+    [S * 0.0040, AMBER_SOFT, 0.20, true],
+    [S * 0.0017, WARM_CORE, 0.55 * lipGlow + 0.25, false],
+  ]);
+}
+
+/* ---------------- framing: aura + hairline reticle ---------------- */
+let alertMix = 0;
+
+function drawFrame(t) {
+  // breathing aura (state-scaled, level-shimmered while speaking)
+  const auraA = { idle: 0.5, listening: 0.72, thinking: 0.85, speaking: 0.9 }[busState] || 0.5;
+  const breathe = 1 + 0.02 * Math.sin(t * (Math.PI * 2) / 4.2) * MOTION;
+  g.save();
+  g.translate(CX, CY - S * 0.02);
+  g.scale(breathe, breathe);
+  g.translate(-CX, -(CY - S * 0.02));
+  g.globalAlpha = Math.min(1, auraA * (0.75 + 0.25 * Math.sin(t * 0.9))
+    + (busState === "speaking" ? Math.min(0.18, busLevel * 0.25) : 0));
+  g.fillStyle = auraGrad;
+  g.fillRect(0, 0, W, H);
+  g.globalAlpha = 0.8;
+  g.fillStyle = fieldGrad;
+  g.fillRect(0, 0, W, H);
+  g.restore();
+  g.globalAlpha = 1;
+
+  // hairline arcs — a lens reticle, ultra-slow, barely there
+  const R = S * 0.405;
+  const rot = t * 0.005 * MOTION;
+  g.strokeStyle = alertMix > 0.01 ? rgba(mix([148, 163, 184], RED, alertMix), 0.14) : "rgba(148,163,184,0.11)";
+  g.lineWidth = 1;
+  g.beginPath(); g.arc(CX, CY, R, -2.62 + rot, -1.95 + rot); g.stroke();
+  g.beginPath(); g.arc(CX, CY, R, 0.52 + rot, 1.19 + rot); g.stroke();
+  g.beginPath(); g.arc(CX, CY, R * 1.045, -2.47 + rot, -2.30 + rot); g.stroke();
+  g.beginPath(); g.arc(CX, CY, R * 1.045, 0.67 + rot, 0.84 + rot); g.stroke();
+  // cardinal ticks
+  for (let i = 0; i < 4; i++) {
+    const a = rot + i * Math.PI / 2;
+    const x0 = CX + Math.cos(a) * (R + S * 0.018), y0 = CY + Math.sin(a) * (R + S * 0.018);
+    const x1 = CX + Math.cos(a) * (R + S * 0.030), y1 = CY + Math.sin(a) * (R + S * 0.030);
+    g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+  }
+}
+
+/* ---------------- caption ---------------------------------------- */
+const CAPTION = { idle: "DORMANT", listening: "LISTENING", thinking: "THINKING", speaking: "SPEAKING" };
+const setLS = (v) => { try { g.letterSpacing = v; } catch (e) {} };
+
+function drawCaption() {
+  const mono = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  const y0 = CY + S * 0.315;
+  // hairline separator
+  g.strokeStyle = "rgba(148,163,184,0.16)";
+  g.lineWidth = 1;
+  g.beginPath(); g.moveTo(CX, y0 - S * 0.040); g.lineTo(CX, y0 - S * 0.026); g.stroke();
+
+  g.textAlign = "center"; g.textBaseline = "middle";
+  // name (from the bus config)
+  setLS("0.55em");
+  g.font = "600 " + Math.max(8, S * 0.0115) + "px " + mono;
+  g.fillStyle = "rgba(100,116,139,0.9)";
+  g.fillText(cfgName.toUpperCase(), CX, y0);
+  // the state word — slate at rest, accent when active
+  setLS("0.38em");
+  g.font = "500 " + Math.max(9, S * 0.014) + "px " + mono;
+  g.fillStyle = busState !== "idle" ? rgba(TEAL, 0.92) : "rgba(100,116,139,0.95)";
+  g.fillText(CAPTION[busState] || "DORMANT", CX, y0 + S * 0.026);
+  if (cfgBadge) {
+    setLS("0.42em");
+    g.font = "400 " + Math.max(7, S * 0.0085) + "px " + mono;
+    g.fillStyle = "rgba(71,85,105,0.75)";
+    g.fillText(cfgBadge.toUpperCase(), CX, y0 + S * 0.050);
+  }
+  setLS("0px");
+}
+
+/* ---------------- the loop --------------------------------------- */
+let last = performance.now();
+let running = true;
+
+function frame(ts) {
+  if (!running) return;
+  const dt = Math.min(0.05, Math.max(0.0005, (ts - last) / 1000));
+  last = ts;
+  const t = ts / 1000;
+
+  pollBus();
+  const speaking = busState === "speaking";
+  mouthStep(dt, speaking);
+  eyesStep(dt, t);
+  alertMix += ((busAlert ? 1 : 0) - alertMix) * rate(dt, 0.2);
+
+  // paint
+  g.fillStyle = bgGrad;
+  g.fillRect(0, 0, W, H);
+  drawFrame(t);
+  drawEye(CX - S * 0.145, CY - S * 0.072, t);
+  drawEye(CX + S * 0.145, CY - S * 0.072, t);
+  drawMouth(t);
+  drawCaption();
+
+  requestAnimationFrame(frame);
+}
+
+// pause when hidden; resume with a fresh clock so dt never jumps
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    running = false;
+  } else {
+    running = true;
+    last = performance.now();
+    requestAnimationFrame(frame);
+  }
+});
+
+// F = fullscreen (same affordance as the other faces)
+addEventListener("keydown", (e) => {
+  if (e.key === "f" || e.key === "F") {
+    document.fullscreenElement ? document.exitFullscreen()
+      : document.documentElement.requestFullscreen();
+  }
+});
+
+requestAnimationFrame(frame);
+</script>
+<!-- mlv-ux-2: visible fullscreen exit affordance (the F key was the only way out) -->
+<button id="mist-fs-exit" type="button" aria-label="Exit fullscreen (F)" title="Exit fullscreen (F)">&#215; exit fullscreen (F)</button>
+<style>
+#mist-fs-exit{display:none;position:fixed;top:14px;right:14px;z-index:99999;padding:6px 10px;border:1px solid rgba(255,255,255,.25);border-radius:8px;background:rgba(8,12,18,.55);color:rgba(224,255,250,.92);font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.04em;cursor:pointer;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);transition:background .15s,border-color .15s}
+#mist-fs-exit:hover{background:rgba(8,12,18,.78);border-color:rgba(94,234,212,.5)}
+#mist-fs-exit:focus-visible{outline:2px solid rgba(94,234,212,.7);outline-offset:2px}
+</style>
+<script>
+(function(){
+  var b=document.getElementById('mist-fs-exit');
+  if(!b)return;
+  function sync(){b.style.display=document.fullscreenElement?'block':'none'}
+  function exit(){if(document.fullscreenElement){var p=document.exitFullscreen();if(p&&p.catch)p.catch(function(){})}}
+  document.addEventListener('fullscreenchange',sync);
+  b.addEventListener('click',exit);
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'&&document.fullscreenElement)exit()});
+  sync();
+})();
+</script>
+
+</body>
+</html>
