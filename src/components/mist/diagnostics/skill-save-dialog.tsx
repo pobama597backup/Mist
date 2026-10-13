@@ -49,12 +49,15 @@ export function SkillSaveDialog({
 
   // Re-seed the form every time the dialog opens.
   useEffect(() => {
-    if (open) {
+    if (!open) return
+    // deferred to a macrotask — re-seeding the form setStates synchronously
+    const id = window.setTimeout(() => {
       setName(initial?.name ?? '')
       setTrigger(initial?.trigger ?? '')
       setSteps(initial?.steps ?? '')
       setNotes(initial?.notes ?? '')
-    }
+    }, 0)
+    return () => window.clearTimeout(id)
   }, [open, initial])
 
   const canSave = name.trim().length > 0 && trigger.trim().length > 0 && !saving

@@ -1,10 +1,20 @@
 {
-  "latest_version": "2026.9.8",
-  "checked_at": "2026-10-05T20:51:25.940Z",
-  "last_sync_at": "2026-10-05T20:51:25.940Z",
-  "last_changed_at": "2026-10-05T06:19:04.700Z",
+  "latest_version": "2026.10.1",
+  "checked_at": "2026-10-11T22:53:16.774Z",
+  "last_sync_at": "2026-10-11T22:53:16.774Z",
+  "last_changed_at": "2026-10-11T14:18:59.351Z",
   "last_error": null,
   "history": [
+    {
+      "version": "2026.10.1",
+      "seen_at": "2026-10-11T14:18:59.351Z",
+      "notes_excerpt": "2026.10.1 OpenClaw v2026.10.1 For formatted release notes, read this release on the docs site. OpenClaw v2026.10.1 helps your agent find a relevant installed skill when a task needs it, without putting the whole skill library in the prompt. You can then work with compatible, opt-in MCP Apps beside chat, using supported forms and workspace files. To keep your setup recoverable, full backups can now"
+    },
+    {
+      "version": "2026.9.9",
+      "seen_at": "2026-10-10T06:48:30.047Z",
+      "notes_excerpt": "2026.9.9 v2026.9.9 For formatted release notes, read this release on the docs site. OpenClaw 2026.9.9 adds GPT-6.1 Sol to the Codex model list and supports Claude Haiku 5.5 through Anthropic and Claude CLI, improves recovery after failed updates, fixes missing iMessage replies, and keeps an old scheduled job from interrupting a newer conversation. Release scale: 112 pull requests, 69 direct commit"
+    },
     {
       "version": "2026.9.8",
       "seen_at": "2026-10-05T06:19:04.700Z",

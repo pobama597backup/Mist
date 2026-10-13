@@ -17,6 +17,8 @@ import type {
   MemoryFact,
   MemoryQueueItem,
   MemoryStats,
+  QuarantineListResponse,
+  QuarantineDecideResponse,
   OpenClawStatus,
   ResearchJob,
   ResearchJobSummary,
@@ -82,6 +84,8 @@ export const mistApi = {
   // ---- tools ----
   tools: {
     list: () => json<ToolInfo[]>('/tools/list'),
+    /** Phase 3-b · P9: counts only (status bar) — no tool payload. */
+    count: () => json<{ count: number; omni: number; skills: number }>('/tools/count'),
     categories: () => json<ToolCategory[]>('/tools/categories'),
     info: (name: string) => json<ToolInfo>(`/tools/${encodeURIComponent(name)}/info`),
     execute: (
@@ -116,6 +120,15 @@ export const mistApi = {
         body: JSON.stringify({ query, n_results: nResults }),
       }),
     stats: () => json<MemoryStats>('/memory/stats'),
+    quarantine: {
+      // Phase 2-c — the S11 inbox: tainted internal writes awaiting the owner
+      list: () => json<QuarantineListResponse>('/quarantine'),
+      decide: (id: string, decision: 'accept' | 'edit' | 'drop', content?: string) =>
+        json<QuarantineDecideResponse>('/quarantine', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'decide', id, decision, content }),
+        }),
+    },
   },
 
   // ---- voice ----

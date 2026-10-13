@@ -4,8 +4,17 @@
 // system · tools · memory · knowledge · voice · skills · agents · evolve ·
 // auto · operators · vault). Mounted once at the app shell root; visibility
 // and active tab live in the global store.
+//
+// Phase 4-a · P1 (dynamic imports): every tab body is next/dynamic
+// (client-only, skeleton while its chunk loads) and mounts ONLY after its
+// tab is first opened. Once opened it STAYS mounted — Radix TabsContent
+// forceMount keeps the DOM alive (hidden when inactive) so re-entering a
+// visited tab is instant and keeps its scroll/state. The mounted-set below
+// is the "has this tab ever been opened this drawer session" latch; it
+// resets when the drawer unmounts (the close already tore everything down).
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import dynamic from 'next/dynamic'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   Activity,
@@ -20,6 +29,7 @@ import {
   Network,
   Radar,
   Route,
+  ShieldCheck,
   Sparkles,
   Vault as VaultIcon,
   Wrench,
@@ -27,40 +37,15 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Skeleton } from '@/components/ui/skeleton'
 import { useMistStore, type DrawerTab } from '@/lib/store'
-import { SystemTab } from './system-tab'
-import { ToolsTab } from './tools-tab'
-import { MemoryTab } from './memory-tab'
-import { VoiceTab } from './voice-tab'
-import { SkillsTab } from './skills-tab'
-import { AgentsTab } from './agents-tab'
-import { EvolutionTab } from './evolution-tab'
-import { AutomationsTab } from './automations-tab'
-import { VaultTab } from './vault-tab'
-import { SubagentsTab } from './subagents-tab'
-import { TracesTab } from './traces-tab'
-import { EfficiencyTab } from './efficiency-tab'
-import { KnowledgeTab } from './knowledge-tab'
-import { OperatorsTab } from './operators-tab'
-import { UpstreamTab } from './upstream-tab'
 import { TabBoundary } from './tab-boundary'
+import type { ComponentType } from 'react'
 
-// 10-e2 NOTE FOR THE LEAD — store.ts is frozen for this agent, so the newer
-// tab ids live in this local superset. Please extend the union in src/lib/store.ts
-// (one line) and this type collapses into a harmless no-op superset:
-//   export type DrawerTab = 'system' | 'tools' | 'memory' | 'voice' | 'skills' | 'agents' | 'evolve' | 'automations' | 'vault'
-//     | 'subagents' | 'upstream' | 'traces' | 'efficiency' | 'knowledge' | 'operators'
-// openDrawer only persists the string, so the runtime cast below is safe either way.
-type DrawerTabAll =
-  | DrawerTab
-  | 'automations'
-  | 'vault'
-  | 'subagents'
-  | 'upstream'
-  | 'traces'
-  | 'efficiency'
-  | 'knowledge'
-  | 'operators'
+// v-redesign: the store's DrawerTab union now carries the full 16-tab surface
+// (the 10-e2 local-superset debt is closed). This alias is kept so the TABS /
+// TAB_BODIES declarations below stay untouched.
+type DrawerTabAll = DrawerTab
 
 const TABS: { value: DrawerTabAll; label: string; icon: LucideIcon }[] = [
   // oj-lab-6: upstream + traces lead — they're the new headline surfaces
@@ -68,6 +53,7 @@ const TABS: { value: DrawerTabAll; label: string; icon: LucideIcon }[] = [
   { value: 'traces', label: 'Traces', icon: Route },
   { value: 'system', label: 'System', icon: Activity },
   { value: 'efficiency', label: 'Stats', icon: Gauge },
+  { value: 'control', label: 'Control', icon: ShieldCheck },
   { value: 'tools', label: 'Tools', icon: Wrench },
   { value: 'memory', label: 'Memory', icon: Brain },
   { value: 'knowledge', label: 'Knowledge', icon: Library },
@@ -81,6 +67,69 @@ const TABS: { value: DrawerTabAll; label: string; icon: LucideIcon }[] = [
   { value: 'vault', label: 'Vault', icon: VaultIcon },
 ]
 
+/** Shared loading skeleton for a lazily-loading tab body. */
+function TabSkeleton() {
+  return (
+    <div className="space-y-3" aria-hidden>
+      <Skeleton className="h-20 w-full rounded-xl bg-white/5" />
+      <Skeleton className="h-20 w-full rounded-xl bg-white/5" />
+      <Skeleton className="h-6 w-2/5 rounded-lg bg-white/5" />
+    </div>
+  )
+}
+
+/** One dynamic tab: named export → client-only chunk → skeleton bridge. */
+function lazyTab(load: () => Promise<Record<string, unknown>>, pick: string) {
+  return dynamic(
+    () =>
+      load().then((m) => {
+        const comp = m[pick] as ComponentType | undefined
+        if (!comp) throw new Error(`dynamic tab: export "${pick}" missing`)
+        return { default: comp }
+      }),
+    { ssr: false, loading: TabSkeleton }
+  )
+}
+
+// Phase 4-a · P1: all 15 tab bodies load on first open, never on app boot.
+const UpstreamTab = lazyTab(() => import('./upstream-tab'), 'UpstreamTab')
+const TracesTab = lazyTab(() => import('./traces-tab'), 'TracesTab')
+const SystemTab = lazyTab(() => import('./system-tab'), 'SystemTab')
+const EfficiencyTab = lazyTab(() => import('./efficiency-tab'), 'EfficiencyTab')
+const ToolsTab = lazyTab(() => import('./tools-tab'), 'ToolsTab')
+const MemoryTab = lazyTab(() => import('./memory-tab'), 'MemoryTab')
+const KnowledgeTab = lazyTab(() => import('./knowledge-tab'), 'KnowledgeTab')
+const VoiceTab = lazyTab(() => import('./voice-tab'), 'VoiceTab')
+const SkillsTab = lazyTab(() => import('./skills-tab'), 'SkillsTab')
+const AgentsTab = lazyTab(() => import('./agents-tab'), 'AgentsTab')
+const SubagentsTab = lazyTab(() => import('./subagents-tab'), 'SubagentsTab')
+const EvolutionTab = lazyTab(() => import('./evolution-tab'), 'EvolutionTab')
+const AutomationsTab = lazyTab(() => import('./automations-tab'), 'AutomationsTab')
+const OperatorsTab = lazyTab(() => import('./operators-tab'), 'OperatorsTab')
+const VaultTab = lazyTab(() => import('./vault-tab'), 'VaultTab')
+// Phase 6-a: the Control Room (standing orders · audit trail · A4 panel)
+const ControlRoomTab = lazyTab(() => import('./control-room-tab'), 'ControlRoomTab')
+
+/** tab id → its lazily-loaded body. */
+const TAB_BODIES: Record<DrawerTabAll, ComponentType> = {
+  upstream: UpstreamTab,
+  traces: TracesTab,
+  system: SystemTab,
+  efficiency: EfficiencyTab,
+  tools: ToolsTab,
+  memory: MemoryTab,
+  knowledge: KnowledgeTab,
+  voice: VoiceTab,
+  skills: SkillsTab,
+  agents: AgentsTab,
+  subagents: SubagentsTab,
+  evolve: EvolutionTab,
+  automations: AutomationsTab,
+  operators: OperatorsTab,
+  vault: VaultTab,
+  control: ControlRoomTab,
+}
+
 export function DiagnosticsDrawer() {
   const drawerOpen = useMistStore((s) => s.drawerOpen)
   const drawerTab = useMistStore((s) => s.drawerTab)
@@ -89,6 +138,17 @@ export function DiagnosticsDrawer() {
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   // The user's explicit M.I.S.T. preference wins over the OS signal.
   const noMotion = useMistStore((s) => s.reducedMotion)
+
+  // Phase 4-a · P1 "mount active only, keep mounted": the set of tabs that
+  // have been opened during THIS drawer session. A tab joins on first
+  // activation and never leaves — hidden via Radix's forceMount, so switching
+  // back is instant and state survives. (Adjust-during-render latch — the
+  // documented pattern; no effect, no cascading renders, strict-mode safe.)
+  const [openedTabs, setOpenedTabs] = useState<Set<DrawerTabAll>>(() => new Set())
+  const activeTab = drawerTab as DrawerTabAll
+  if (!openedTabs.has(activeTab)) {
+    setOpenedTabs((prev) => new Set(prev).add(activeTab))
+  }
 
   // Escape closes the drawer.
   useEffect(() => {
@@ -144,7 +204,7 @@ export function DiagnosticsDrawer() {
               <div className="min-w-0">
                 <h2 className="font-mono text-xs tracking-[0.3em] text-slate-300">DIAGNOSTICS</h2>
                 <p className="mt-0.5 truncate font-mono text-[10px] text-slate-500">
-                  upstream · traces · stats · knowledge · operators · system · tools · memory · voice · skills · agents · evolve · auto · vault
+                  upstream · traces · stats · control · knowledge · operators · system · tools · memory · voice · skills · agents · evolve · auto · vault
                 </p>
               </div>
               <button
@@ -179,86 +239,29 @@ export function DiagnosticsDrawer() {
               </div>
 
               {/* each panel is isolated — a render error shows a retry card
-                  instead of blanking the drawer (12-d1 hardening) */}
-              <div 
+                  instead of blanking the drawer (12-d1 hardening). forceMount
+                  keeps visited tabs alive (hidden by Radix when inactive);
+                  the body itself mounts only after first open. */}
+              <div
                 ref={scrollContainerRef}
                 className="min-h-0 flex-1 overflow-y-auto mist-scroll"
               >
-                <TabsContent value="upstream" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="upstream">
-                    <UpstreamTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="traces" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="traces">
-                    <TracesTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="system" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="system">
-                    <SystemTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="efficiency" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="efficiency">
-                    <EfficiencyTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="tools" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="tools">
-                    <ToolsTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="memory" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="memory">
-                    <MemoryTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="knowledge" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="knowledge">
-                    <KnowledgeTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="voice" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="voice">
-                    <VoiceTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="skills" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="skills">
-                    <SkillsTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="agents" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="agents">
-                    <AgentsTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="evolve" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="evolve">
-                    <EvolutionTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="automations" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="automations">
-                    <AutomationsTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="operators" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="operators">
-                    <OperatorsTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="subagents" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="subagents">
-                    <SubagentsTab />
-                  </TabBoundary>
-                </TabsContent>
-                <TabsContent value="vault" className="m-0 p-4 focus-visible:outline-none">
-                  <TabBoundary label="vault">
-                    <VaultTab />
-                  </TabBoundary>
-                </TabsContent>
+                {TABS.map((t) => {
+                  const Body = TAB_BODIES[t.value]
+                  const mounted = openedTabs.has(t.value)
+                  return (
+                    <TabsContent
+                      key={t.value}
+                      value={t.value}
+                      forceMount
+                      className="m-0 p-4 focus-visible:outline-none data-[state=inactive]:hidden"
+                    >
+                      <TabBoundary label={t.value}>
+                        {mounted ? <Body /> : null}
+                      </TabBoundary>
+                    </TabsContent>
+                  )
+                })}
               </div>
             </Tabs>
           </motion.aside>

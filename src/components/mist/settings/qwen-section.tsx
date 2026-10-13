@@ -96,9 +96,13 @@ export function QwenModelsSection({
 
   useEffect(() => {
     if (!info) return
-    setTextSel(info.selected.text)
-    setVisionSel(info.selected.vision)
-    setBaseUrl(baseUrlValue || info.base_url || DEFAULT_BASE)
+    // deferred to a macrotask — syncing the selections setStates synchronously
+    const id = window.setTimeout(() => {
+      setTextSel(info.selected.text)
+      setVisionSel(info.selected.vision)
+      setBaseUrl(baseUrlValue || info.base_url || DEFAULT_BASE)
+    }, 0)
+    return () => window.clearTimeout(id)
   }, [info, baseUrlValue])
 
   const dirty = useMemo(

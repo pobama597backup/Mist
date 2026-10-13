@@ -362,7 +362,10 @@ async function probeTools(): Promise<ProbeResult> {
   const failures: string[] = []
   await Promise.allSettled(
     safe.map(async (name) => {
-      const res = await executeTool(name, name === 'calculate' ? { expression: '2+2' } : {}, false)
+      const res = await executeTool(name, name === 'calculate' ? { expression: '2+2' } : {}, false, {
+        origin: 'owner_heartbeat', // Phase 2-b: self-checks are unattended
+        interactive: false,
+      })
       if (!res.success) failures.push(`${name}: ${String(res.error ?? 'failed').slice(0, 80)}`)
     })
   )
@@ -732,7 +735,8 @@ async function applyAutoRepair(f: Finding): Promise<string> {
             timezone: 'Africa/Lagos',
             delivery: 'silent',
           },
-          'auto'
+          'auto',
+          { source: 'introspection' } // Phase 2-c: static, code-authored re-arm — owner-side provenance
         )
         outcome = res.ok ? 'nightly dream cron re-armed (23:30)' : `cron re-arm failed: ${res.error}`
       } else {

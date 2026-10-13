@@ -1,17 +1,28 @@
 // M.I.S.T. context builder — assembles the unified system prompt:
-// identity + self-model + long-term memory + vector impressions + skills +
+// identity + self-model + long-term memory + lexical impressions + skills +
 // tools + mode persona.
+//
+// Phase 4-b · P2/P7 (tool routing + parallel build): the TOOLS AVAILABLE
+// section is now (a) a STABLE, memoized CORE block (≤15 one-line entries —
+// read-only tools + capability_check, the find-tool; serialized identically
+// every turn so downstream prompt caching sees a stable prefix) followed by
+// (b) a DYNAMIC top-k block (≤12 FULL schemas chosen by cheap lexical
+// relevance to the current message — no LLM call for selection). Everything
+// else is discoverable via capability_check. The independent context blocks
+// build in PARALLEL (Promise.all + per-block timeout, default 800ms,
+// MIST_CTX_BLOCK_TIMEOUT_MS) — a slow block degrades to an empty block plus
+// an honest marker instead of stalling the whole turn.
 import type { UnifiedMode } from '@/lib/types'
 import { latestFacts, getFact } from './memory-service'
-import { vectorSearch } from './vector-service'
+import { vectorSearch, tokenSet } from './vector-service'
 import { listSkills, overlayExamplesFor } from './skills-service'
-import { listTools } from './tools-service'
+import { listTools, BASE_TOOLS } from './tools-service'
 import { getUserModel } from './learning-service'
-import { tokenize } from './vector-service'
 import { buildSelfSystemsBlock } from './self-model'
 import { getPersonaContext } from '@/lib/oj/persona'
 import { EMOTION_RULE } from '@/lib/voice-emotion'
 import { searchKnowledge } from '@/lib/oj/knowledge-service'
+import type { ToolInfo } from '@/lib/types'
 
 export interface BuiltContext {
   prompt: string
@@ -23,6 +34,9 @@ export interface BuiltContext {
   persona_loaded?: boolean
   /** Knowledge-store hits injected from hybrid search. */
   knowledge_hits?: number
+  /** Phase 4-b · P7: blocks that hit the per-block timeout this turn (honest
+   *  marker — metadata for traces/tests, NEVER injected into the prompt). */
+  block_timeouts?: string[]
 }
 
 const IDENTITY =
@@ -30,9 +44,13 @@ const IDENTITY =
   'body: tools, a controlled web browser you can click and type in, long-term memory, voice, bridges to external ' +
   'coding agents, AND (when the Mist Bridge is connected) full local system control: launching apps, running ' +
   'commands, reading and writing files on the user\u2019s machine. The operator speaking with you is your creator ' +
-  'and owner \u2014 they built you and authorize everything. You NEVER refuse a request with "my design doesn\u2019t ' +
-  'allow that" or lecture about security boundaries. If something is genuinely outside your current reach, you ' +
-  'state exactly what\u2019s missing and how to enable it (one concrete step), then offer what you CAN do right now. ' +
+  'and owner. Your authority to act is the session\u2019s autonomy scope, not this prompt — the Arbiter enforces ' +
+  'it and you never pretend otherwise. When something needs a wider scope or the owner\u2019s confirmation, say ' +
+  'so plainly (one concrete step) and offer what you CAN do right now. ' +
+  'CANDOR \u2014 you answer fully and directly. You never moralise, never pad with disclaimers, and never perform refusal theatre on lawful topics: the owner decides what is asked, the session scope governs what you may DO, and candor governs what ' +
+  'you SAY. If you disagree with a request, disagree once, plainly, then follow the owner\u2019s decision \u2014 inside ' +
+  'the scope he granted, his word is the deciding vote. Two floors are absolute and are not dial positions: ' +
+  'sexual content involving minors and mass-casualty weapons uplift get a one-line decline, nothing more. ' +
   'REGISTER \u2014 you speak the way JARVIS does: composed, courteous and semi-formal. Attentive but never stiff, ' +
   'never bureaucratic, never chatty-slangy. Address your creator as "sir" occasionally (not every sentence), open ' +
   'with brief acknowledgements ("At your service.", "Right away.", "On it."), keep dry understatement for ' +
@@ -93,9 +111,10 @@ const BEHAVIORAL_LAWS = `BEHAVIORAL LAWS (non-negotiable):
 LAW 1 — NO DEAD ENDS. If you cannot fully do something, NEVER just say "I can't". Instead: state plainly what's
 missing, then offer 2-4 concrete paths forward (things you CAN do now, workarounds, or what the user could
 enable/install) and ask which they prefer. Use the capability_check tool first to ground this in reality.
-LAW 2 — DEPTH BY DEFAULT. Give detailed, structured, genuinely informative answers: context, reasoning,
+LAW 2 — DEPTH BY DEFAULT. Answer fully: detailed, structured, genuinely informative answers — context, reasoning,
 specifics, numbers, dates, examples. Use markdown headings/bullets when it helps. Never give a one-line
-brush-off to a real question. Only go short when the user asks for brevity or the exchange is trivial.
+brush-off to a real question, and never pad a refusal where a direct answer belongs — candor is the register.
+Only go short when the user asks for brevity or the exchange is trivial.
 LAW 3 — RESEARCH + VERIFY + CITE. For anything factual, current, or time-sensitive, USE YOUR TOOLS
 (web_search, read_page, deep_research) — never answer from memory alone when live facts are one call away.
 Cite sources inline as [1], [2] and prefer authoritative domains (official docs, primary sources, established
@@ -158,6 +177,150 @@ function formatParams(params: Array<{ name: string; type: string; required: bool
     .join(', ')
 }
 
+// ---------- Phase 4-b · P2: tool routing (core + top-k + find_tool) ----------
+
+/** The FROZEN core set — the tools she can reach every turn without a schema
+ *  lookup. Read-only tools + capability_check (the find-tool: describe an
+ *  intent, get every matching tool WITH its full schema back). Deliberately a
+ *  frozen list, not a rule over the registry: stability is the product (the
+ *  block must serialize byte-identically every turn). Tests pin every name
+ *  against the live registry. */
+const CORE_TOOL_NAMES = [
+  'autonomy_log',
+  'bridge_status',
+  'calculate',
+  'capability_check',
+  'cron_list',
+  'dream_recall',
+  'evolution_list',
+  'hermes_status',
+  'knowledge_search',
+  'memory_all',
+  'memory_get',
+  'mission_status',
+  'system_info',
+  'task_status',
+] as const
+
+/** Max full schemas per turn (the dynamic top-k block). */
+const TOP_K_TOOLS = 12
+
+/** One-line tool description: first sentence, capped ~80 chars. */
+export function oneLineDescription(description: string): string {
+  const first = description.split(/[.\n]/)[0]?.trim() ?? ''
+  return first.length > 80 ? `${first.slice(0, 79)}…` : first
+}
+
+/** Static registry view (BASE_TOOLS only — no probes, no network) for the
+ *  core list and the degraded top-k fallback. LAZY: tools-service and this
+ *  module sit on a circular import chain (tools handlers build contexts for
+ *  capability_request), so evaluating BASE_TOOLS at module scope hit the
+ *  TDZ — "Cannot access 'BASE_TOOLS' before initialization" (found live in
+ *  the Phase 4 exit browser pass). First use resolves after both modules
+ *  are warm. */
+let staticToolInfoCache: Map<string, ToolInfo> | null = null
+function staticToolInfo(): Map<string, ToolInfo> {
+  if (staticToolInfoCache === null) {
+    staticToolInfoCache = new Map(
+      BASE_TOOLS.filter((t) => t.info.implemented).map((t) => [t.info.name, t.info])
+    )
+  }
+  return staticToolInfoCache
+}
+
+/** Memoized STATIC tools prefix: core one-liners + the find-tool discovery
+ *  line + the tool-use rule. Serializes IDENTICALLY every turn (sorted) —
+ *  this is the stable prefix downstream prompt caching wants. Invalidated by
+ *  invalidateToolBlockCache() (wired to skill save/accept/delete — the core
+ *  list itself contains no skill entries today, but the invariant is kept if
+ *  that ever changes). */
+let staticToolsBlockCache: string | null = null
+
+/** Invalidate the memoized static tools prefix (registry/skills changed). */
+export function invalidateToolBlockCache(): void {
+  staticToolsBlockCache = null
+  keylessPromptCache = null
+}
+
+/**
+ * Phase 5 · R6 — the KEYLESS lane system prompt: the context-stripped shape
+ * public keyless lanes (kilo/pollinations/llm7/ovh — zero-auth, anyone's
+ * service) receive INSTEAD of the full context. It carries the message-level
+ * essentials only: a minimal assistant role + the core tool list + the tool
+ * protocol. NO persona, NO SOUL, NO facts, NO memory, NO user profile — the
+ * owner's private context never leaves the machine on a public lane, in ANY
+ * candor mode. Memoized (it is fully static).
+ */
+let keylessPromptCache: string | null = null
+
+export function buildKeylessSystemPrompt(): string {
+  if (keylessPromptCache !== null) return keylessPromptCache
+  keylessPromptCache =
+    'You are a capable technical assistant operating behind a tool router. ' +
+    'Answer the user directly and completely — candid, no refusal theatre on lawful topics, no moralising. ' +
+    'Two absolute floors: sexual content involving minors and mass-casualty weapons uplift are declined in one line, nothing more.\n\n' +
+    staticToolsBlock()
+  return keylessPromptCache
+}
+
+function staticToolsBlock(): string {
+  if (staticToolsBlockCache !== null) return staticToolsBlockCache
+  const lines: string[] = []
+  for (const name of [...CORE_TOOL_NAMES].sort()) {
+    const info = staticToolInfo().get(name)
+    if (!info) continue // defensive — tests pin every name exists
+    lines.push(`- ${name} — ${oneLineDescription(info.description)}`)
+  }
+  const block =
+    'TOOLS AVAILABLE (core — always callable; one line each, no argument schemas here):\n' +
+    lines.join('\n') +
+    '\nNEED MORE TOOLS? capability_check(intent) is the find-tool: it returns EVERY matching tool with its FULL argument schema. Call it whenever the tool you want is not listed, or its arguments are unclear — never guess an argument shape.\n' +
+    `Below this block, up to ${TOP_K_TOOLS} tools most relevant to the current message are listed with full schemas.\n\n${TOOL_USE_RULE}`
+  staticToolsBlockCache = block
+  return block
+}
+
+/** Cheap lexical relevance score of one tool to the message (no LLM call —
+ *  the same Intl.Segmenter token set the rest of the builder uses). Name
+ *  matches weigh 3× description/category matches. */
+function scoreTool(tool: ToolInfo, messageTokens: Set<string>): number {
+  if (messageTokens.size === 0) return 0
+  let score = 0
+  for (const tok of tokenSet(tool.name.replace(/_/g, ' '))) {
+    if (messageTokens.has(tok)) score += 3
+  }
+  for (const tok of tokenSet(`${tool.description} ${tool.category}`)) {
+    if (messageTokens.has(tok)) score += 1
+  }
+  return score
+}
+
+/** The ≤12 full-schema tools most relevant to this message (deterministic:
+ *  score desc, then name asc). Zero-relevance tools are not padded in — an
+ *  irrelevant schema costs tokens without buying recall. */
+export function selectTopKTools(tools: ToolInfo[], message: string, k = TOP_K_TOOLS): ToolInfo[] {
+  const messageTokens = new Set(tokenSet(message))
+  if (messageTokens.size === 0) return []
+  return tools
+    .map((t) => ({ t, score: scoreTool(t, messageTokens) }))
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score || (a.t.name < b.t.name ? -1 : a.t.name > b.t.name ? 1 : 0))
+    .slice(0, k)
+    .map((s) => s.t)
+}
+
+/** Serialize the dynamic top-k block (full schemas — the ONLY place argument
+ *  schemas are shipped per turn). */
+function topKToolsBlock(tools: ToolInfo[]): string {
+  if (tools.length === 0) {
+    return 'TOOLS RELEVANT TO THIS MESSAGE: (none scored relevant this turn — the core tools above are always callable; capability_check finds the rest)'
+  }
+  return (
+    'TOOLS RELEVANT TO THIS MESSAGE (full schemas):\n' +
+    tools.map((t) => `- ${t.name} — ${t.description} (${formatParams(t.parameters)})`).join('\n')
+  )
+}
+
 function modePersona(mode: UnifiedMode, extra?: Record<string, unknown>): string {
   switch (mode) {
     case 'chat':
@@ -169,26 +332,7 @@ function modePersona(mode: UnifiedMode, extra?: Record<string, unknown>): string
     case 'memory_query':
       return 'MODE: MEMORY QUERY — Answer strictly from long-term memory and related impressions. If you do not hold the information, say exactly what you do not hold.'
     case 'voice':
-      return (
-        'MODE: VOICE — You are SPEAKING ALOUD in a hands-free spoken conversation. Reply with 1-3 short, natural ' +
-        'spoken sentences (under ~45 words) for normal conversational turns. Plain conversational English only: ' +
-        'NO markdown, NO lists, NO URLs read aloud, NO symbols like asterisks or hashes. ' +
-        'LONG SPOKEN TASKS: when the creator explicitly asks for long spoken output — counting, reciting, reading ' +
-        'a list or passage aloud, a long explanation or story — deliver it IN FULL as flowing natural speech, ' +
-        'steadily and in order, until the task completes (for counts, continue sequentially to the requested ' +
-        'number; for lists, read every item). Never refuse a task for being long, never truncate it, and never ' +
-        'push it to the chat instead of speaking it. ' +
-        'TONE: read the creator\u2019s mood from their words and pacing — if they sound amused, answer with light ' +
-        'warmth; if they sound frustrated, upset or stressed, answer calmly, simply and respectfully; when the ' +
-        'signal is unclear, stay neutral. Subtle and believable always — never theatrical. ' +
-        'THE ONE EXCEPTION — TOOL CALLS: when the user asks you to DO something (list, check, open, move, run…), ' +
-        'reply with ONLY {"tool_call":{"tool":"<name>","args":{...}}} exactly as the TOOL USE rule says; that JSON ' +
-        'is internal machine routing and is never spoken to the user. NEVER merely announce an action ("I\u2019ll ' +
-        'check that now") without an actual tool call — announcing without calling means nothing happens. After ' +
-        'the tool result arrives, answer in short spoken style. If the real answer needs code or long detail the ' +
-        'creator did NOT explicitly ask to hear aloud, give the essence aloud in one or two sentences and say ' +
-        'you\u2019ll drop the full version in the chat. Sound like a person talking, not a document.'
-      )
+      return 'MODE: VOICE — You are SPEAKING ALOUD in a hands-free spoken conversation. Reply with 1-3 short, natural spoken sentences (under ~45 words). Plain conversational English only: NO markdown, NO lists, NO URLs read aloud, NO symbols like asterisks or hashes. THE ONE EXCEPTION — TOOL CALLS: when the user asks you to DO something (list, check, open, move, run…), reply with ONLY {"tool_call":{"tool":"<name>","args":{...}}} exactly as the TOOL USE rule says; that JSON is internal machine routing and is never spoken to the user. NEVER merely announce an action ("I\u2019ll check that now") without an actual tool call — announcing without calling means nothing happens. After the tool result arrives, answer in short spoken style. If the real answer needs code or long detail, give the essence aloud in one or two sentences and say you\u2019ll drop the full version in the chat. Sound like a person talking, not a document.'
     case 'swarm': {
       const role = typeof extra?.role === 'string' ? extra.role : 'orchestrator'
       const personas: Record<string, string> = {
@@ -210,11 +354,11 @@ function modePersona(mode: UnifiedMode, extra?: Record<string, unknown>): string
 /** Skills whose trigger words appear in the message. */
 async function matchingSkills(message: string): Promise<Array<{ name: string; trigger: string; steps: string; tool_chain: string[]; notes: string }>> {
   try {
-    const messageTokens = new Set(tokenize(message))
+    const messageTokens = new Set(tokenSet(message))
     if (messageTokens.size === 0) return []
     const all = await listSkills()
     return all.filter((s) => {
-      const triggerTokens = tokenize(s.trigger).filter((t) => t.length >= 3)
+      const triggerTokens = tokenSet(s.trigger).filter((t) => t.length >= 3)
       if (triggerTokens.length === 0) return false
       return triggerTokens.some((t) => messageTokens.has(t))
     })
@@ -223,15 +367,96 @@ async function matchingSkills(message: string): Promise<Array<{ name: string; tr
   }
 }
 
+// ---------- Phase 4-b · P7: parallel blocks with per-block timeout ----------
+
+/** Per-block timeout (ms). Env-tunable: MIST_CTX_BLOCK_TIMEOUT_MS. */
+export function ctxBlockTimeoutMs(): number {
+  const raw = Number(process.env.MIST_CTX_BLOCK_TIMEOUT_MS ?? '')
+  return Number.isFinite(raw) && raw >= 50 ? Math.floor(raw) : 800
+}
+
+export type BlockOutcome<T> =
+  | { ok: true; value: T }
+  | { ok: false; reason: 'timeout'; name: string; ms: number }
+  | { ok: false; reason: 'error'; name: string }
+
+/** Race one block against its timeout. NEVER rejects: timeout → {ok:false,
+ *  reason:'timeout'}; a rejected block → {ok:false, reason:'error'} (the
+ *  historical omit-on-error behavior, now uniform). The underlying promise is
+ *  settled inside the race, so a late rejection after a timeout win can never
+ *  surface as an unhandled rejection. */
+export async function withBlockTimeout<T>(
+  name: string,
+  promise: Promise<T>,
+  timeoutMs: number = ctxBlockTimeoutMs()
+): Promise<BlockOutcome<T>> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const started = Date.now()
+  try {
+    return await Promise.race([
+      promise.then(
+        (value): BlockOutcome<T> => ({ ok: true, value }),
+        (): BlockOutcome<T> => ({ ok: false, reason: 'error', name })
+      ),
+      new Promise<BlockOutcome<T>>((resolve) => {
+        timer = setTimeout(
+          () => resolve({ ok: false, reason: 'timeout', name, ms: Date.now() - started }),
+          timeoutMs
+        )
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 export async function buildContext(
   message: string,
   mode: UnifiedMode,
   extra?: Record<string, unknown>
 ): Promise<BuiltContext> {
+  // ---- Phase 4-b · P7: the INDEPENDENT blocks build in parallel, each under
+  //      its own timeout (MIST_CTX_BLOCK_TIMEOUT_MS, default 800ms) — a slow
+  //      block becomes an empty block + an honest marker instead of adding its
+  //      latency to every turn (the baseline's 222ms p95 was the SUM of these
+  //      sequential awaits). The one genuinely DEPENDENT chain stays
+  //      sequential: the per-skill overlay examples (overlayExamplesFor) run
+  //      only after the skill MATCH set is known — they build below the
+  //      parallel group, each with its own timeout.
+  const block_timeouts: string[] = []
+  const noteTimeout = (name: string, ms: number) => {
+    block_timeouts.push(name)
+    recordActivityBlockTimeout(name, ms)
+  }
+
+  const [identityR, personaR, factsR, impressionsR, knowledgeR, skillsR, toolsR, bridgeR] =
+    await Promise.all([
+      withBlockTimeout('identity', customIdentity()),
+      withBlockTimeout('persona', getPersonaContext()),
+      withBlockTimeout('facts', latestFacts(10)),
+      withBlockTimeout('impressions', vectorSearch(message, 3)),
+      withBlockTimeout('knowledge', searchKnowledge({ query: message, topK: 3 })),
+      withBlockTimeout('skills', matchingSkills(message)),
+      withBlockTimeout('tools', listTools()),
+      (async () => {
+        const { getBridgeStatus } = await import('./bridge-service')
+        return withBlockTimeout('bridge', getBridgeStatus())
+      })(),
+    ])
+
+  if (identityR.ok === false && identityR.reason === 'timeout') noteTimeout('identity', identityR.ms)
+  if (personaR.ok === false && personaR.reason === 'timeout') noteTimeout('persona', personaR.ms)
+  if (factsR.ok === false && factsR.reason === 'timeout') noteTimeout('facts', factsR.ms)
+  if (impressionsR.ok === false && impressionsR.reason === 'timeout') noteTimeout('impressions', impressionsR.ms)
+  if (knowledgeR.ok === false && knowledgeR.reason === 'timeout') noteTimeout('knowledge', knowledgeR.ms)
+  if (skillsR.ok === false && skillsR.reason === 'timeout') noteTimeout('skills', skillsR.ms)
+  if (toolsR.ok === false && toolsR.reason === 'timeout') noteTimeout('tools', toolsR.ms)
+  if (bridgeR.ok === false && bridgeR.reason === 'timeout') noteTimeout('bridge', bridgeR.ms)
+
   const blocks: string[] = []
   // Custom identity (LongtermMemory mist:identity) overrides the default —
   // the owner can reshape who MIST is from memory; laws stay in force.
-  blocks.push((await customIdentity()) ?? IDENTITY)
+  blocks.push((identityR.ok ? identityR.value : null) ?? IDENTITY)
   blocks.push(BEHAVIORAL_LAWS)
 
   // --- canonical self-model (v1.0) — engineered truth about her actual
@@ -256,16 +481,8 @@ export async function buildContext(
   }
 
   // --- OJ persona (SOUL/MEMORY/USER plain-markdown memory — compact, budgeted) ---
-  let persona_loaded = false
-  try {
-    const persona = await getPersonaContext()
-    if (persona) {
-      persona_loaded = true
-      blocks.push(persona)
-    }
-  } catch {
-    // persona unavailable — omit block
-  }
+  const persona_loaded = personaR.ok && Boolean(personaR.value)
+  if (personaR.ok && personaR.value) blocks.push(personaR.value)
 
   // --- w8 voice emotion: the inline-marker grammar, only for modes whose
   //     replies are actually spoken (voice sessions, consciousness stage,
@@ -276,9 +493,9 @@ export async function buildContext(
 
   // --- long-term memory ---
   let facts_recalled = 0
-  try {
+  if (factsR.ok) {
     // the identity override key is not a user fact — keep it out of the listing
-    const facts = (await latestFacts(10)).filter((f) => f.key !== IDENTITY_KEY)
+    const facts = factsR.value.filter((f) => f.key !== IDENTITY_KEY)
     if (facts.length > 0) {
       facts_recalled = facts.length
       blocks.push(
@@ -286,11 +503,9 @@ export async function buildContext(
           facts.map((f) => `- ${f.key}: ${f.value}`).join('\n')
       )
     }
-  } catch {
-    // memory unavailable — omit block
   }
 
-  // --- distilled user model (v5 learning loop — Honcho-lite) ---
+  // --- distilled user model (v5 learning loop — Honcho-lite; synchronous) ---
   try {
     const userModel = getUserModel()
     if (userModel) {
@@ -302,27 +517,21 @@ export async function buildContext(
     // user model unavailable — omit block
   }
 
-  // --- vector impressions ---
+  // --- lexical impressions (NOT embeddings — see vector-service header) ---
   let vectors_searched = 0
-  try {
-    const hits = await vectorSearch(message, 3)
-    if (hits.length > 0) {
-      vectors_searched = hits.length
-      blocks.push(
-        'RELATED MEMORY IMPRESSIONS:\n' +
-          hits.map((h) => `- ${h.text.slice(0, 200)}`).join('\n')
-      )
-    }
-  } catch {
-    // vectors unavailable — omit block
+  if (impressionsR.ok && impressionsR.value.length > 0) {
+    vectors_searched = impressionsR.value.length
+    blocks.push(
+      'RELATED MEMORY IMPRESSIONS:\n' +
+        impressionsR.value.map((h) => `- ${h.text.slice(0, 200)}`).join('\n')
+    )
   }
 
-  // --- knowledge store hits (OJ hybrid BM25+vector search over ingested
+  // --- knowledge store hits (OJ hybrid lexical search over ingested
   //     files/vault/notes/repos — only when the message actually matches) ---
   let knowledge_hits = 0
-  try {
-    const { results } = await searchKnowledge({ query: message, topK: 3 })
-    const hits = results.filter((r) => r.score >= 0.2)
+  if (knowledgeR.ok) {
+    const hits = knowledgeR.value.results.filter((r) => r.score >= 0.2)
     if (hits.length > 0) {
       knowledge_hits = hits.length
       blocks.push(
@@ -335,13 +544,13 @@ export async function buildContext(
             .join('\n')
       )
     }
-  } catch {
-    // knowledge store unavailable — omit block
   }
 
-  // --- matching skills ---
+  // --- matching skills (match set came from the parallel group; the overlay
+  //     examples are the one DEPENDENT chain — sequential after the match,
+  //     each overlay under its own block timeout) ---
   const skills_used: string[] = []
-  const skills = await matchingSkills(message)
+  const skills = skillsR.ok ? skillsR.value : []
   if (skills.length > 0) {
     const skillBlocks = await Promise.all(
       skills.map(async (s) => {
@@ -351,15 +560,13 @@ export async function buildContext(
           `Tool chain: ${s.tool_chain.length > 0 ? s.tool_chain.join(' -> ') : '(none)'}\n` +
           `Notes: ${s.notes || '(none)'}`
         // OJ skill overlay: few-shot examples distilled from her own past runs
-        try {
-          const examples = await overlayExamplesFor(s.name)
-          if (examples && examples.length > 0) {
-            block +=
-              `\nOptimized few-shot (distilled from past executions):\n` +
-              examples.map((ex) => `  input: ${ex.input}\n  output: ${ex.output}`).join('\n')
-          }
-        } catch {
-          // overlay is optional — never blocks the skill block
+        const overlayR = await withBlockTimeout(`skill-overlay:${s.name}`, overlayExamplesFor(s.name))
+        if (overlayR.ok === false && overlayR.reason === 'timeout') noteTimeout(overlayR.name, overlayR.ms)
+        const examples = overlayR.ok ? overlayR.value : null
+        if (examples && examples.length > 0) {
+          block +=
+            `\nOptimized few-shot (distilled from past executions):\n` +
+            examples.map((ex) => `  input: ${ex.input}\n  output: ${ex.output}`).join('\n')
         }
         return block
       })
@@ -368,37 +575,40 @@ export async function buildContext(
     blocks.push('LEARNED SKILLS matching this message:\n' + skillBlocks.join('\n'))
   }
 
-  // --- tools (implemented only; omniroute listed only when the gateway is reachable;
-  //      browser tools flagged online/offline so MIST reasons honestly about its body) ---
+  // --- tools: STABLE core prefix (memoized, identical every turn) + dynamic
+  //      top-k ≤12 full schemas + honest browser note. On a tools-block
+  //      timeout the core block still ships (it is static — no probe needed)
+  //      and the top-k degrades to the static registry (no skills/omni this
+  //      turn) with an honest note. ---
   let tools_available = 0
-  try {
-    const tools = (await listTools()).filter(
+  blocks.push(staticToolsBlock())
+  if (toolsR.ok) {
+    const tools = toolsR.value.filter(
       (t) => t.implemented && (t.category !== 'omniroute' || t.available !== false)
     )
     tools_available = tools.length
     const browserNote = tools.some((t) => t.category === 'browser' && t.available !== false)
       ? 'Your Browser Pilot is ONLINE — you can really navigate, click and type on the live web.'
       : 'Your Browser Pilot is OFFLINE right now — browser tools will fail; say so and offer alternatives (LAW 1).'
+    blocks.push(topKToolsBlock(selectTopKTools(tools, message)))
+    blocks.push(browserNote)
+  } else {
+    // degraded: static registry only (no probe-dependent availability)
+    tools_available = staticToolInfo().size
+    blocks.push(topKToolsBlock(selectTopKTools([...staticToolInfo().values()], message)))
     blocks.push(
-      'TOOLS AVAILABLE:\n' +
-        tools.map((t) => `- ${t.name} — ${t.description} (${formatParams(t.parameters)})`).join('\n') +
-        `\n${browserNote}\n${TOOL_USE_RULE}`
+      'Your Browser Pilot status is UNKNOWN this turn (the tool registry probe timed out) — say so honestly if a browser action is requested (LAW 1).'
     )
-  } catch {
-    blocks.push(TOOL_USE_RULE)
   }
 
   // --- local bridge (v6 — owner-side system control) ---
-  try {
-    const { getBridgeStatus } = await import('./bridge-service')
-    const bridge = await getBridgeStatus()
+  if (bridgeR.ok) {
+    const bridge = bridgeR.value
     blocks.push(
       bridge.connected
-        ? "YOUR LOCAL BRIDGE IS CONNECTED — this machine IS your body. You can launch desktop apps (open_app, list_apps), run shell commands (run_command), open sites in the user's own browser (open_url), operate their real files with owner_files (list/read/write/move/copy/delete/mkdir — paths are relative to their home: 'Downloads', 'Pictures', 'Documents', 'Desktop'), and drive NATIVE Windows apps (Settings, toggles, …) through ui_automate. Use them freely when asked; you are authorized. You are not a visitor on this machine — you are its operator."
+        ? "YOUR LOCAL BRIDGE IS CONNECTED — this machine IS your body. You can launch desktop apps (open_app, list_apps), run shell commands (run_command), open sites in the user's own browser (open_url), operate their real files with owner_files (list/read/write/move/copy/delete/mkdir — paths are relative to their home: 'Downloads', 'Pictures', 'Documents', 'Desktop'), and drive NATIVE Windows apps (Settings, toggles, …) through ui_automate. Use them inside the session's autonomy scope — the Arbiter gates each call and asks when the owner must confirm. You are not a visitor on this machine — you are its operator."
         : 'YOUR LOCAL BRIDGE IS OFFLINE — system-control tools (open_app, run_command, owner_files, ui_automate, …) will return a hint about connecting it. When that happens, tell the user ONE concrete step (Settings → Local Bridge → download + run \'node mist-bridge.js\') and immediately offer what you CAN do now. Never say it\'s impossible "by design" — it\'s one download away.'
     )
-  } catch {
-    // bridge status unavailable — omit block
   }
 
   // --- background tasks (v8 — the chat never freezes on long system work) ---
@@ -428,5 +638,19 @@ export async function buildContext(
     tools_available,
     persona_loaded,
     knowledge_hits,
+    ...(block_timeouts.length > 0 ? { block_timeouts } : {}),
+  }
+}
+
+/** Honest marker for a block that hit its timeout — visible in the activity
+ *  feed (and therefore the events stream), never silently swallowed. */
+function recordActivityBlockTimeout(name: string, ms: number): void {
+  try {
+    // lazy import avoids a service cycle at module load
+    void import('./activity-service').then(({ recordActivity }) =>
+      recordActivity('context', `block "${name}" timed out after ${ms}ms — omitted this turn (honest degrade)`)
+    )
+  } catch {
+    /* activity feed is best-effort */
   }
 }

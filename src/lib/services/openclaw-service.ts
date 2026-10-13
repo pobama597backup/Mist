@@ -16,6 +16,9 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { OpenClawStatus } from '@/lib/types'
 import { recordActivity } from './activity-service'
+import * as lifecycle from './lifecycle'
+import { egressFetch, EgressPausedError } from './egress'
+import { outboundWatchersEnabled } from './settings-service'
 
 const OPENCLAW_REPO = 'openclaw/openclaw'
 const OPENCLAW_UPSTREAM_URL = 'https://github.com/openclaw/openclaw'
@@ -69,18 +72,21 @@ async function writeState(state: OpenClawState): Promise<void> {
 
 // ---------- network ----------
 
+// Phase 4-b · R5: the OpenClaw digest sync is a watcher (npmjs registry +
+// raw.githubusercontent.com) — its fetches ride the egress gate.
 async function fetchText(url: string, timeoutMs = 20_000): Promise<string | null> {
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), timeoutMs)
   try {
-    const res = await fetch(url, {
+    const res = await egressFetch(url, {
       signal: ac.signal,
       cache: 'no-store',
       headers: { 'User-Agent': 'mist-watchtower' },
     })
     if (!res.ok) return null
     return await res.text()
-  } catch {
+  } catch (err) {
+    if (err instanceof EgressPausedError) throw err // surfaced by syncOpenClaw as the honest paused answer
     return null
   } finally {
     clearTimeout(timer)
@@ -95,11 +101,27 @@ export interface OpenClawSyncResult {
   version: string | null
   previous_version: string | null
   notes_excerpt: string
+  /** Phase 4-b · R5: true when the sync idled because outbound watchers are disabled. */
+  paused?: boolean
   message: string
 }
 
 /** Pull the latest upstream version + release notes into the local digest. */
 export async function syncOpenClaw(force = false): Promise<OpenClawSyncResult> {
+  // Phase 4-b · R5: dormant = 0 outbound — the 12h auto sync and manual
+  // pulls idle while the flag is off (honest paused answer, no fake freshness).
+  if (!(await outboundWatchersEnabled())) {
+    recordActivity('openclaw', 'sync skipped — outbound watchers disabled (dormant: zero outbound)')
+    return {
+      ok: false,
+      paused: true,
+      changed: false,
+      version: null,
+      previous_version: null,
+      notes_excerpt: '',
+      message: 'watchers paused — outbound is off. Enable watchers in the Upstream tab to allow the OpenClaw digest sync.',
+    }
+  }
   const state = await readState()
 
   // rate-limit friendly: manual pings within the gap reuse the cached check
@@ -294,4 +316,5 @@ export function ensureOpenClawWatch(): void {
     CHECK_INTERVAL_MS
   )
   g.timer.unref?.()
+  lifecycle.registerInterval('openclaw-watch', g.timer) // Phase 3-a: SIGTERM clears it
 }

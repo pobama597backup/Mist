@@ -169,7 +169,7 @@ export function startBgTask(
   pruneTasks(map)
   recordActivity('bg-task', `started ${act} — ${task.label}`)
   // fire-and-forget: this promise resolves long after the reply was sent
-  void bridgeExec(act, safeArgs)
+  void bridgeExec(act, safeArgs, { origin: 'owner_cron' }) // Phase 2-b: unattended background work
     .then((res) => finalizeTask(task, res))
     .catch((err: unknown) =>
       finalizeTask(task, {

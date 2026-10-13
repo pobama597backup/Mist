@@ -412,7 +412,7 @@ function ActionsTab({
 
 // ---------------------------------------------------------------- shell
 
-export function MistPowerPalette() {
+export function MistPowerPalette({ openRequest }: { openRequest?: number }) {
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<PaletteTab>('actions')
   const [search, setSearch] = useState('')
@@ -427,17 +427,17 @@ export function MistPowerPalette() {
   const [operators, setOperators] = useState<OperatorItem[] | null>(null)
   const loadedRef = useRef<{ llm: boolean; tools: boolean; ops: boolean }>({ llm: false, tools: false, ops: false })
 
-  // Ctrl+Shift+P / ⌘+Shift+P — distinct from the navbar's Ctrl+K
-  useEffect(() => {
-    const down = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyP') {
-        e.preventDefault()
-        setOpen((v) => !v)
-      }
-    }
-    document.addEventListener('keydown', down)
-    return () => document.removeEventListener('keydown', down)
-  }, [])
+  // Phase 4-a · P1: the app-shell gate owns the Ctrl+Shift+P keystroke so
+  // this chunk loads only after the first press; every press arrives here
+  // as an incremented `openRequest` sequence (toggle). Applied via the
+  // documented adjust-state-during-render pattern (no effect, no cascading
+  // re-render, rapid presses never merge) — strict-mode safe: the second
+  // render pass sees the already-updated mirror and does nothing.
+  const [prevReq, setPrevReq] = useState(0)
+  if (openRequest !== undefined && openRequest !== prevReq) {
+    setPrevReq(openRequest)
+    setOpen((v) => !v)
+  }
 
   // load the active tab's data (once per session-open)
   useEffect(() => {

@@ -674,24 +674,33 @@ export async function runSelfUpgradeCycle(): Promise<SelfUpgradeResult> {
             // if the name already exists as the user's, the gap is already covered
             const existingOrigin = await skillOriginOf(p.skill.name)
             if (existingOrigin === null) {
-              await saveSkill({
-                name: p.skill.name,
-                trigger: p.skill.trigger,
-                steps: p.skill.steps,
-                tool_chain: p.skill.toolChain,
-                notes: `auto-proposed by the self-upgrade cycle — trend: ${digest.headline}`,
-              })
+              await saveSkill(
+                {
+                  name: p.skill.name,
+                  trigger: p.skill.trigger,
+                  steps: p.skill.steps,
+                  tool_chain: p.skill.toolChain,
+                  notes: `auto-proposed by the self-upgrade cycle — trend: ${digest.headline}`,
+                },
+                // Phase 2-c: internal auto-save — derived provenance. No turn
+                // rides this unattended cycle, so no taint check is possible
+                // here (honest gap: the cycle digests web-sourced trends).
+                { auto: true, source: 'self-upgrade-cycle' }
+              )
               await markSkillAuto(p.skill.name, p.skill.confidence)
               skillsProposed.push(p.skill.name)
             } else if (existingOrigin === 'auto') {
               // MIST's own skill — refine it in place, keep the auto provenance
-              await saveSkill({
-                name: p.skill.name,
-                trigger: p.skill.trigger,
-                steps: p.skill.steps,
-                tool_chain: p.skill.toolChain,
-                notes: `refined by the self-upgrade cycle — trend: ${digest.headline}`,
-              })
+              await saveSkill(
+                {
+                  name: p.skill.name,
+                  trigger: p.skill.trigger,
+                  steps: p.skill.steps,
+                  tool_chain: p.skill.toolChain,
+                  notes: `refined by the self-upgrade cycle — trend: ${digest.headline}`,
+                },
+                { auto: true, source: 'self-upgrade-cycle' }
+              )
               await markSkillAuto(p.skill.name, p.skill.confidence)
               skillsProposed.push(p.skill.name)
             }

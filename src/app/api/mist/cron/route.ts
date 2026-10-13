@@ -104,7 +104,7 @@ export async function POST(request: NextRequest) {
     spec.timezone = timezone
     spec.delivery = delivery
 
-    const created = await createCronJob(spec, 'user')
+    const created = await createCronJob(spec, 'user', { source: 'owner-ui' }) // Phase 2-c: the owner's own hands — trust 'owner'
     if (!created.ok || !created.job) {
       return NextResponse.json({ error: created.error ?? 'failed to create job' }, { status: 400 })
     }

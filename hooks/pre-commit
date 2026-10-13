@@ -1,0 +1,8 @@
+#!/bin/sh
+# Phase 1 · S9 — no secret may enter a commit (see scripts/secret-scan.ts).
+# To allowlist a known-safe fixture, stage it and run the scan first:
+#   bun scripts/secret-scan.ts --allow=<substring-of-the-value>
+# then commit with the same allow flag (git passes hook args only via
+# config, so prefer keeping the allowlist empty — fixtures should be
+# assembled at runtime, like tests/security/secretscan.test.ts does).
+exec bun scripts/secret-scan.ts "$@"

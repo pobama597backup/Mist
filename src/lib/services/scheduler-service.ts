@@ -31,6 +31,8 @@ import { unified } from './llm-service'
 import { logAutonomyEvent } from './autonomy-service'
 import { raiseSystemAlert } from './heartbeat-service'
 import { recordActivity } from './activity-service'
+import * as lifecycle from './lifecycle'
+import { shouldQuarantine, quarantineWrite } from '@/lib/arbiter/quarantine'
 
 const DEFAULT_TZ = 'Africa/Lagos'
 const WATCH_INTERVAL_S = 30
@@ -809,9 +811,21 @@ function nextRunFor(job: {
   return nextCronRunUtc(job.expr, job.timezone)
 }
 
+export interface CronWriteContext {
+  /** Phase 2-c provenance + quarantine routing. auto:true marks an INTERNAL
+   *  auto-creation (LLM/skill-derived content) — a tainted turn routes to the
+   *  quarantine inbox instead of creating the job. Tool-path and owner-UI
+   *  creations never set auto: the Arbiter (or the owner's hands) covered them. */
+  turnId?: string | null
+  source?: string
+  auto?: boolean
+  trust?: 'owner' | 'derived'
+}
+
 export async function createCronJob(
   spec: CronJobSpec,
-  origin: 'user' | 'auto' | 'mist' | 'digest' = 'user'
+  origin: 'user' | 'auto' | 'mist' | 'digest' = 'user',
+  ctx: CronWriteContext = {}
 ): Promise<{ ok: boolean; job?: Record<string, unknown>; error?: string }> {
   try {
     const name = String(spec?.name ?? '').trim().slice(0, MAX_NAME_CHARS)
@@ -859,8 +873,28 @@ export async function createCronJob(
       nextRunAt = t
     }
 
+    // Phase 2-c (S11): internal auto-creations from a tainted turn never
+    // schedule — the exact proposed job goes to the quarantine inbox instead.
+    if (ctx.auto === true) {
+      const check = shouldQuarantine(ctx.turnId ?? null, { ...spec })
+      if (check.hit) {
+        await quarantineWrite('cron', JSON.stringify({ spec, origin }), {
+          source: ctx.source ?? 'internal',
+          reason: check.reason,
+          turnId: ctx.turnId ?? null,
+        })
+        return { ok: false, error: `quarantined — ${check.reason}; the job waits in the quarantine inbox (memory drawer) for the owner` }
+      }
+    }
+
+    const trust = ctx.trust ?? (ctx.auto === true || ctx.turnId ? 'derived' : 'owner')
     const job = await schedulerDb().cronJob.create({
-      data: { name, prompt, kind, expr, intervalMin, runAt, timezone, delivery, enabled: true, origin, nextRunAt },
+      data: {
+        name, prompt, kind, expr, intervalMin, runAt, timezone, delivery, enabled: true, origin, nextRunAt,
+        trust,
+        source: ctx.source ?? null,
+        createdByTurn: ctx.turnId ?? null,
+      },
     })
     recordActivity('scheduler', `job created: ${name} (${kind})`)
     return { ok: true, job: job as unknown as Record<string, unknown> }
@@ -957,7 +991,9 @@ async function executeJob(job: CronJobRow): Promise<{ ok: boolean; result: strin
   let status: 'ok' | 'error' = 'ok'
   try {
     const res = await withTimeout(
-      unified({ message: job.prompt, mode: 'chat', history: [] }),
+      // Phase 2-b: scheduled runs are unattended owner turns — their tool
+      // calls arbitrate as owner_cron (side effects queue for owner review).
+      unified({ message: job.prompt, mode: 'chat', history: [], origin: 'owner_cron', interactive: false }),
       JOB_TIMEOUT_MS,
       `scheduled run '${job.name}'`
     )
@@ -1124,7 +1160,8 @@ async function seedDefaultJobs(): Promise<boolean> {
         timezone: DEFAULT_TZ,
         delivery: 'alert',
       },
-      'auto'
+      'auto',
+      { source: 'seed' } // Phase 2-c: static, code-authored defaults — owner-side provenance
     )
     await createCronJob(
       {
@@ -1136,7 +1173,8 @@ async function seedDefaultJobs(): Promise<boolean> {
         timezone: DEFAULT_TZ,
         delivery: 'alert',
       },
-      'auto'
+      'auto',
+      { source: 'seed' } // Phase 2-c: static, code-authored defaults — owner-side provenance
     )
     await logAutonomyEvent('cron_run', 'scheduler seeded the default automations: "Morning briefing" (daily 08:00) and "Nightly self-review" (daily 22:00)', {
       seeded: ['Morning briefing', 'Nightly self-review'],
@@ -1171,5 +1209,6 @@ export function ensureSchedulerWatch(): void {
     void schedulerTick()
   }, WATCH_INTERVAL_S * 1000)
   g.timer.unref?.()
+  lifecycle.registerInterval('scheduler-watch', g.timer) // Phase 3-a: SIGTERM clears it
   recordActivity('scheduler', `cron scheduler armed (${WATCH_INTERVAL_S}s watch, loop v${SCHEDULER_VERSION})`)
 }

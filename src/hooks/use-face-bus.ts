@@ -1,9 +1,11 @@
 'use client'
 
-// M.I.S.T. face-bus emitter hook (v7) — mounted ONCE by the app shell.
+// M.I.S.T. face-bus emitter hook (v8) — mounted ONCE by the app shell.
 //
 // Bridges Mist's live consciousness state into two places at once:
-//  · the EMBEDDED faces (iframes under /av/faces/* read window.__mistBus),
+//  · the EMBEDDED faces (sandboxed iframes under /av/faces/* ask over the
+//    postMessage bridge — installFaceBus wires the listener; the answers
+//    are computed fresh per request by face-bus.ts),
 //  · the OWNER's machine (throttled POSTs → Mist Bridge v2 → ".voice_*" files
 //    → every companion face on their PC performs Mist).
 //
@@ -23,14 +25,17 @@ export function useFaceBusEmitter(): void {
     setFaceIdentity('MIST', 'CONSCIOUSNESS')
   }, [])
 
-  // state transitions → both buses (embedded faces read it synchronously,
-  // the bridge POST is deduped + fire-and-forget)
+  // state transitions → both buses (the embedded faces ask the bridge and
+  // get this answer computed fresh per request; the bridge POST is deduped
+  // + fire-and-forget)
   useEffect(() => {
     emitFaceState(neuralState)
   }, [neuralState])
 
-  // while speaking: tap the real waveform at ~12 Hz (embedded faces) — the
-  // outbound POST is throttled to 4 Hz inside emitFaceWaveform
+  // while speaking: tap the real waveform at ~12 Hz (the embedded faces
+  // receive it on their next ask — core.js polls /state at 120ms, the
+  // visage at animation rate) — the outbound POST is throttled to 4 Hz
+  // inside emitFaceWaveform
   useEffect(() => {
     if (neuralState !== 'speaking') return
     const id = window.setInterval(() => emitFaceWaveform(), 80)

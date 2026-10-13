@@ -11,10 +11,13 @@ datasource db {
 }
 
 model Conversation {
-  id        String    @id @default(cuid())
-  title     String    @default("New thread")
-  createdAt DateTime  @default(now())
-  messages  Message[]
+  id         String    @id @default(cuid())
+  title      String    @default("New thread")
+  createdAt  DateTime  @default(now())
+  messages   Message[]
+  // Phase 5 · C2 — per-conversation candor dial override (null = fall to
+  // the global `candor_mode` setting; 'standard' | 'frank' | 'unfiltered').
+  candorMode String?
 
   @@index([createdAt])
 }
@@ -35,10 +38,13 @@ model Message {
 }
 
 model LongtermMemory {
-  key       String   @id
-  value     String
-  trust     String   @default("auto") // auto | trusted | untrusted (quarantined — blocked from prompts; OpenJarvis trust tiers)
-  createdAt DateTime @default(now())
+  key           String   @id
+  value         String
+  trust         String   @default("owner") // owner | derived | auto | trusted | untrusted (untrusted = quarantined, blocked from prompts; owner/derived are the Phase 2-c trust tiers)
+  source        String? // provenance: tool name, path, or quarantine:<id>
+  createdByTurn String? // the conversation turn that wrote this fact
+  pinned        Boolean  @default(false) // owner-pinned facts survive curation
+  createdAt     DateTime @default(now())
 }
 
 model MemoryQueue {
@@ -49,6 +55,10 @@ model MemoryQueue {
   dueAt     DateTime? // when set (kind=reminder), the 60s heartbeat fires it into chat
   firedAt   DateTime?
   createdAt DateTime  @default(now())
+
+  // Phase 3-a · R9 (phase-0 index map): the heartbeat's due-check scans
+  // kind+status+dueAt every 60s — unindexed until now.
+  @@index([kind, status, dueAt])
 }
 
 // v4 heartbeat — proactive alerts delivered into the chat (⏰ reminders, 📦 releases)
@@ -72,6 +82,10 @@ model VectorMemory {
   source    String   @default("conversation") // conversation | fact | skill | note
   metadata  String   @default("{}") // JSON string
   createdAt DateTime @default(now())
+
+  // Phase 3-a · R9: vectorSearch does findMany(orderBy createdAt desc, take 500)
+  // — a FULL SCAN + SORT on every chat turn without this index (P5).
+  @@index([createdAt])
 }
 
 model Skill {
@@ -83,6 +97,10 @@ model Skill {
   notes      String   @default("")
   uses       Int      @default(0)
   origin     String   @default("user") // user | auto (v5 learning loop)
+  trust      String   @default("owner") // owner | derived | untrusted (Phase 2-c: derived = turn/LLM-produced, untrusted = quarantined)
+  source     String? // provenance: learning-loop | self-upgrade-cycle | tool:<name> | quarantine:<id> | owner-ui
+  createdByTurn String? // the turn that produced this skill
+  pinned     Boolean  @default(false)
   version    Int      @default(1) // bumped every auto-refinement
   confidence Float    @default(0) // LLM confidence when auto-created (0-1)
   createdAt  DateTime @default(now())
@@ -143,10 +161,33 @@ model CronJob {
   lastResult  String    @default("") // trimmed result summary
   runCount    Int       @default(0)
   origin      String    @default("user") // user | auto (seeded by MIST herself)
+  trust       String    @default("owner") // owner | derived | untrusted (Phase 2-c: derived = turn/LLM-produced, untrusted = quarantined)
+  source      String? // provenance: seed | tool:<name> | introspection | quarantine:<id> | owner-ui
+  createdByTurn String? // the turn that produced this job
+  pinned      Boolean   @default(false)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
   @@index([enabled, nextRunAt])
+}
+
+// Phase 2-c (S11) — the quarantine inbox: tainted internal auto-writes land
+// here INSTEAD of their real table (fact | skill | cron | persona) and never
+// inject into recall until the owner accepts (or edits) them from the memory
+// drawer. Accepting performs the write with trust 'derived' and source
+// 'quarantine:<id>' — the owner's review is the provenance.
+model QuarantineItem {
+  id          String    @id @default(cuid())
+  kind        String // fact | skill | cron | persona
+  contentJson String // the exact proposed write
+  source      String    @default("unknown") // provenance (tool, turn, url)
+  reason      String    @default("") // why quarantined (taint rule hit)
+  turnId      String?
+  status      String    @default("pending") // pending | accepted | edited | dropped
+  createdAt   DateTime  @default(now())
+  decidedAt   DateTime?
+
+  @@index([status, createdAt])
 }
 
 // v5 autonomy ledger — every autonomous action MIST takes on her own
@@ -304,6 +345,9 @@ model Trace {
 
   @@index([agent, createdAt])
   @@index([outcome, createdAt])
+  // Phase 3-a · R9: dream/learning/trace-list filters sort on createdAt alone
+  // — a compound (agent, createdAt) index cannot serve them in SQLite.
+  @@index([createdAt])
 }
 
 model TraceStep {
@@ -439,4 +483,80 @@ model TeacherNotice {
   createdAt DateTime @default(now())
 
   @@index([status, createdAt])
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 2 · Arbiter (Sovereign Hardening Mandate)
+// ═══════════════════════════════════════════════════════════════════════
+
+// Hash-chained, append-only decision log. Every arbitrate() verdict lands
+// here; hash = sha256(prevHash|seq|ts|tool|risk|origin|tainted|decision|
+// reason|argsJson) so tampering with any row breaks the chain (the audit
+// module deliberately exports NO delete — append-only by construction).
+// seq is assigned in code (serialized append: SELECT MAX(seq)+1) because
+// Prisma's autoincrement() only works on Int @id in SQLite.
+model AuditEvent {
+  id       String   @id @default(cuid())
+  seq      Int      @unique
+  ts       DateTime @default(now())
+  tool     String
+  argsJson String   @default("{}")
+  risk     String
+  origin   String
+  tainted  Boolean  @default(false)
+  decision String // allow | ask | deny | defer
+  reason   String   @default("")
+  ticket   String?
+  turnId   String?
+  orderRef String? // standing-order id when one authorized the call
+  prevHash String
+  hash     String
+
+  @@index([ts])
+  @@index([tool, decision])
+}
+
+// Owner-issued standing orders (A3 pre-authorization cards): tool scope +
+// optional path prefixes + a call/spend budget + expiry. The wiring loads
+// active rows and passes them into arbitrate(); the arbiter itself stays
+// pure and never reads the db.
+model StandingOrder {
+  id           String    @id @default(cuid())
+  title        String
+  tools        String    @default("[]") // JSON string[] (or ["*"])
+  pathPrefixes String    @default("[]") // JSON string[] applied to file-ish args
+  budget       String    @default("{}") // JSON {maxCalls?, windowMs?, spendCapUsd?}
+  expiryAt     DateTime?
+  active       Boolean   @default(true)
+  createdBy    String    @default("owner")
+  createdAt    DateTime  @default(now())
+  revokedAt    DateTime?
+
+  @@index([active, expiryAt])
+}
+
+// Phase 5 · C6 — the truthful egress ledger. The in-memory ring buffer is
+// the hot path (one object push per outbound call); this table holds the
+// HOURLY AGGREGATE snapshots (one upsert per host+lane+class+hour, flushed by
+// the lifecycle-registered timer in egress.ts) so /api/mist/data-boundary can
+// answer an honest "last 24h" across restarts. Rows older than 24h are pruned
+// at flush time — the ledger is a 24h window by contract, not an archive.
+model EgressEvent {
+  id     String   @id @default(cuid())
+  ts     DateTime @default(now()) // the hour bucket's start
+  host   String
+  lane   String   @default("") // provider id / tool name / 'watcher' surface
+  klass  String // llm-lane | keyless-lane | watcher | voice | tool | local-lane | bridge
+  bytes  Int      @default(0)
+  count  Int      @default(1)
+
+  @@index([ts])
+  @@index([host, klass, ts])
+}
+
+// Phase 4-b · R5 — owner-tunable runtime settings (key/value rows, not env):
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
 }

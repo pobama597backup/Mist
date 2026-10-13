@@ -14,9 +14,16 @@
   frames (F1/F2/hiss bands) computed in the parent app from the shared
   audio analyser and shipped on the face bus /state contract as `mouth`.
 
-  Bus contract (same-origin parent): poll window.__mistBus.state() every
-  animation frame, window.__mistBus.config() for the name/badge. Opened
-  standalone (no parent bus) the face rests in a gentle idle demo.
+  Bus contract (postMessage, Phase 6-b): the app embeds this face in a
+  sandboxed iframe (allow-scripts only — opaque origin), so the v7
+  same-origin window.__mistBus global is gone. This face speaks the same
+  "__mistFace" protocol as core.js: hello with a MessageChannel, then a
+  state request per animation frame (one in flight at a time), answered
+  by the parent on our port — fresh per request, exactly like the v7
+  synchronous per-frame read, so the 12–55ms tau mouth physics is
+  visually identical. The name/badge (the old config() call) rides every
+  90th response (the v7 cadence). Opened standalone (no Mist parent) the
+  face rests in a gentle idle demo, as before.
 
   Keys: F = fullscreen (the exit affordance below appears in fullscreen).
 -->
@@ -51,11 +58,19 @@
 const canvas = document.getElementById("stage");
 const g = canvas.getContext("2d");
 
-/* ---------------- bus (same-origin parent, if embedded) ---------- */
-let bus = null;
-try {
-  bus = window.parent && window.parent.__mistBus ? window.parent.__mistBus : null;
-} catch (e) { /* cross-origin — standalone */ }
+/* ---------------- bus (postMessage transport, Phase 6-b) --------- *
+ * The Mist app mounts this frame with sandbox="allow-scripts" (no
+ * allow-same-origin — opaque origin), so the ONLY thing this code ever
+ * touches on window.parent is postMessage, with a STRICT origin target
+ * derived from this document's own URL (never "*"). The parent's
+ * answers arrive on a private MessagePort it only holds because we
+ * handed it port2 at hello. Mirrors the transport in core.js; see
+ * src/lib/face-bus.ts for the parent half of the protocol. */
+const MIST_MARKER = "__mistFace";
+let mistOrigin = null, mistPort = null;
+let mistAcked = false, mistGaveUp = false;
+let mistSeq = 0, mistPend = 0, mistTimer = 0, cfgTick = 0;
+try { mistOrigin = new URL("/", location.href).origin; } catch (e) {}
 
 let busState = "idle";     // idle | listening | thinking | speaking
 let busLevel = 0;          // 0..1 voice level from the waveform samples
@@ -63,21 +78,60 @@ let busAlert = false;
 let mouthFrame = null;     // {openness, width, closure} while speaking
 let cfgName = "MIST";
 let cfgBadge = "";
-let cfgTick = 0;
 
-function pollBus() {
-  if (!bus) return;
+function applyBusState(st) {
+  busState = st && st.state ? st.state : "idle";
+  busLevel = st && typeof st.level === "number" ? st.level : 0;
+  busAlert = !!(st && st.alert);
+  mouthFrame = st && st.mouth ? st.mouth : null;
+}
+
+function applyBusConfig(c) {
+  if (c) { cfgName = String(c.name || "MIST"); cfgBadge = String(c.badge || ""); }
+}
+
+function mistOnMsg(e) {
+  const d = e && e.data;
+  if (!d || typeof d !== "object" || d[MIST_MARKER] !== true) return;
+  if (d.type === "hello-ack") { mistAcked = true; return; }
+  if (d.type === "state" && d.payload) {
+    mistPend = 0;
+    applyBusState(d.payload);
+    if ((cfgTick++ % 90) === 0)
+      window.parent.postMessage({ [MIST_MARKER]: true, type: "config",
+                                  seq: ++mistSeq }, mistOrigin);
+  } else if (d.type === "config" && d.payload) {
+    applyBusConfig(d.payload);
+  }
+}
+
+function mistHello() {
+  if (mistGaveUp || mistPort) return;
+  if (!window.parent || window.parent === window) return;
+  if (!mistOrigin || mistOrigin === "null") { mistGaveUp = true; return; }
   try {
-    const st = bus.state();
-    busState = st && st.state ? st.state : "idle";
-    busLevel = st && typeof st.level === "number" ? st.level : 0;
-    busAlert = !!(st && st.alert);
-    mouthFrame = st && st.mouth ? st.mouth : null;
-    if ((cfgTick++ % 90) === 0) {
-      const c = bus.config();
-      if (c) { cfgName = String(c.name || "MIST"); cfgBadge = String(c.badge || ""); }
-    }
-  } catch (e) { bus = null; busState = "idle"; mouthFrame = null; }
+    const ch = new MessageChannel();
+    ch.port1.onmessage = mistOnMsg;   // onmessage assignment implies start()
+    mistPort = ch.port1;
+    window.parent.postMessage({ [MIST_MARKER]: true, type: "hello" },
+                              mistOrigin, [ch.port2]);
+  } catch (e) { mistPort = null; }
+}
+mistHello();
+setTimeout(mistHello, 350);
+setTimeout(mistHello, 900);
+setTimeout(() => { if (!mistAcked) mistGaveUp = true; }, 1800);
+
+// One request in flight at a time: at animation-frame ask rate the reply
+// lands within the same tick or the next, so the mouth physics still sees
+// a fresh frame per response — the v7 semantics, now over the bridge.
+function pollBus() {
+  if (!mistAcked || mistGaveUp || mistPend || !window.parent) return;
+  mistPend = ++mistSeq;
+  clearTimeout(mistTimer);
+  mistTimer = setTimeout(() => { if (mistPend) mistPend = 0; }, 1000);
+  window.parent.postMessage({ [MIST_MARKER]: true, type: "state",
+                              seq: mistPend }, mistOrigin);
 }
 
 /* ---------------- layout / DPR ---------------------------------- */

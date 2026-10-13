@@ -44,8 +44,10 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { db } from '@/lib/db'
 import { recordActivity } from '@/lib/services/activity-service'
+import * as lifecycle from '@/lib/services/lifecycle'
 import { getZai } from '@/lib/services/zai'
 import { getCoreTextModelSelection, noteCoreReportedModel } from '@/lib/services/core-models'
+import { outboundWatchersEnabled } from '@/lib/services/settings-service'
 
 const execFileAsync = promisify(execFile)
 
@@ -132,6 +134,9 @@ export interface OjSyncReport {
   old_head?: string | null
   baseline?: boolean
   busy?: boolean
+  /** Phase 4-b · R5: true when the sweep idled because outbound watchers are
+   *  disabled (dormant = 0 outbound until the owner opts in). */
+  paused?: boolean
   commits?: { total: number; listed: number; sample: OjSyncCommit[]; truncated: boolean }
   files?: { total: number; list: OjSyncFileChange[]; truncated: boolean }
   tiers?: OjSyncTiers
@@ -146,6 +151,9 @@ export interface OjSyncReport {
 export interface OjSyncStatus {
   repo: string
   watching: boolean
+  /** Phase 4-b · R5: false when outbound watchers are disabled — the watch
+   *  loop may still tick but every egress-hitting sweep idles. */
+  watchers_enabled: boolean
   head: string | null
   local_head: string | null
   merge_pending: boolean
@@ -583,6 +591,21 @@ function developInBackground(proposalId: string): void {
 // ---------- the sweep (DETECT → FETCH → MAP → ADAPT) ----------
 
 async function runSweepInner(force: boolean): Promise<OjSyncReport> {
+  // Phase 4-b · R5: dormant = 0 outbound. The watch loop still ticks but the
+  // WHOLE sweep idles while the flag is off — no git ls-remote, no fetch, no
+  // egress of any kind (local bookkeeping like pending fast-forwards and
+  // knowledge flushes resumes with the first enabled sweep). Manual checks
+  // get the same honest paused answer, not an error.
+  if (!(await outboundWatchersEnabled())) {
+    recordActivity('oj-sync', 'sweep skipped — outbound watchers disabled (dormant: zero outbound)')
+    return {
+      ok: false,
+      paused: true,
+      changed: false,
+      head: null,
+      message: 'watchers paused — outbound is off. Enable watchers in the Upstream tab to allow upstream checks.',
+    }
+  }
   const state = await readState()
   const nowIso = new Date().toISOString()
 
@@ -898,6 +921,7 @@ export async function getOjSyncStatus(): Promise<OjSyncStatus> {
   return {
     repo: UPSTREAM_REPO,
     watching: g?.started === true,
+    watchers_enabled: await outboundWatchersEnabled(),
     head: state.last_head,
     local_head: state.local_head,
     merge_pending: !!(state.local_head && state.last_head && state.local_head !== state.last_head),
@@ -1085,6 +1109,18 @@ export function ensureOjSyncWatch(): void {
   g.armedBy = ARM_TOKEN
   recordActivity('oj-sync', 'upstream watch armed — polling open-jarvis/OpenJarvis for new commits')
   scheduleNextSweep(BOOT_DELAY_MS)
+  // Phase 3-a: the sweep is a setTimeout CHAIN (scheduleNextSweep re-arms the
+  // next hop) — the stop clears whatever hop is currently pending on the
+  // shared globalThis state, so it keeps working across HMR re-arms.
+  lifecycle.register('oj-sync-watch', () => {
+    if (g.timer) {
+      try {
+        clearTimeout(g.timer)
+      } catch {
+        /* already gone */
+      }
+    }
+  })
 }
 
 // ============================================================================
@@ -1162,6 +1198,8 @@ export interface MarkLvSyncStatus {
   url: string
   branch: string
   watching: boolean
+  /** Phase 4-b · R5: false when outbound watchers are disabled (dormant). */
+  watchers_enabled: boolean
   status: MarkLvWatchStatus
   head: string | null
   local_head: string | null
@@ -1185,6 +1223,8 @@ export interface MarkLvSyncReport {
   baseline?: boolean
   busy?: boolean
   diverged?: boolean
+  /** Phase 4-b · R5: true when the scan idled because outbound watchers are disabled. */
+  paused?: boolean
   status?: MarkLvWatchStatus
   commits?: { total: number; listed: number; sample: OjSyncCommit[]; truncated: boolean }
   files?: { total: number; list: OjSyncFileChange[]; truncated: boolean }
@@ -1908,6 +1948,18 @@ async function flushMarkLvPendingDigest(state: MarkLvSyncState): Promise<void> {
 // ---------- the Mark-LV scan (DETECT → PULL → ABSORB) ----------
 
 async function runMarkLvSweepInner(force: boolean): Promise<MarkLvSyncReport> {
+  // Phase 4-b · R5: dormant = 0 outbound — same gate as the OJ sweep. The
+  // teacher-notice flow degrades with it (notices paused, honestly labeled).
+  if (!(await outboundWatchersEnabled())) {
+    recordActivity('mark-lv-sync', 'scan skipped — outbound watchers disabled (dormant: zero outbound)')
+    return {
+      ok: false,
+      paused: true,
+      changed: false,
+      head: null,
+      message: 'watchers paused — outbound is off. Enable watchers in the Upstream tab to allow Mark-LV checks.',
+    }
+  }
   const state = await readMarkLvState()
   const nowIso = new Date().toISOString()
 
@@ -2205,6 +2257,7 @@ export async function getMarkLvSyncStatus(): Promise<MarkLvSyncStatus> {
     url: MARK_LV_URL,
     branch: MARK_LV_BRANCH,
     watching: g?.started === true,
+    watchers_enabled: await outboundWatchersEnabled(),
     status: state.status,
     head: state.lastHead,
     local_head: state.localHead ?? (await markLvLocalHead()),
@@ -2285,4 +2338,14 @@ export function ensureMarkLvSyncWatch(): void {
   g.armedBy = MARK_LV_ARM_TOKEN
   recordActivity('mark-lv-sync', `anti-rust watch armed — polling ${MARK_LV_REPO} for new commits (knowledge-first absorption)`)
   scheduleNextMarkLvScan(BOOT_DELAY_MS)
+  // Phase 3-a: same setTimeout-chain stop as the oj-sync watch above.
+  lifecycle.register('mark-lv-sync-watch', () => {
+    if (g.timer) {
+      try {
+        clearTimeout(g.timer)
+      } catch {
+        /* already gone */
+      }
+    }
+  })
 }

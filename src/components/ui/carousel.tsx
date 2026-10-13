@@ -95,11 +95,15 @@ function Carousel({
 
   React.useEffect(() => {
     if (!api) return
-    onSelect(api)
     api.on("reInit", onSelect)
     api.on("select", onSelect)
+    // deferred to a macrotask — the initial onSelect(api) setStates
+    // synchronously (setCanScrollPrev/Next) and the
+    // react-hooks/set-state-in-effect rule is right about cascades
+    const id = window.setTimeout(() => onSelect(api), 0)
 
     return () => {
+      window.clearTimeout(id)
       api?.off("select", onSelect)
     }
   }, [api, onSelect])

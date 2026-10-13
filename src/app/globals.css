@@ -64,7 +64,7 @@
   --destructive: oklch(0.68 0.2 20);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 14%);
-  --ring: oklch(0.75 0.16 300);
+  --ring: var(--accent-color);
   --chart-1: oklch(0.72 0.16 300);
   --chart-2: oklch(0.78 0.16 162);
   --chart-3: oklch(0.8 0.16 85);
@@ -77,13 +77,25 @@
   --sidebar-accent: oklch(0.24 0.02 264);
   --sidebar-accent-foreground: oklch(0.96 0.005 264);
   --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.75 0.16 300);
+  --sidebar-ring: var(--accent-color);
+
+  /* ---- appearance tokens (v-redesign) ----
+     Consumed by the glass classes and the accent-driven glow language.
+     Unitless by design: the glass system scales its base alpha/blur by these
+     (30/16 = the shipped look, byte-for-byte). The app-shell mirrors the
+     store's Appearance prefs onto these after hydration; Settings sliders
+     write them live. */
+  --accent-color: #a855f7;
+  --glass-opacity: 30; /* 10–100 — multiplier on the glass base alpha */
+  --glass-blur: 16; /* 0–40 — multiplier on the glass base blur */
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
+  /* accent follows the Appearance setting — the whole glow language
+     (selection, shimmer, ripples, beams, focus rings) rides this one var */
   html,
   body {
     @apply overflow-x-hidden;
@@ -94,23 +106,42 @@
     background-color: #020617;
   }
   ::selection {
-    background: rgba(192, 132, 252, 0.35);
+    background: color-mix(in srgb, var(--accent-color) 35%, transparent);
   }
 }
 
 @layer components {
-  /* ---- glass system ---- */
+  /* ---- glass system ----
+     v-redesign: the three tiers now consume the Appearance tokens.
+     Base values (5% / 8% / 3% alpha · 24 / 40 / 12px blur) are the shipped
+     look; --glass-opacity 30 and --glass-blur 16 reproduce them exactly, so
+     the defaults are visually byte-identical to the pre-token system. */
   .mist-glass {
-    @apply rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl;
+    border-radius: 1rem;
+    border: 1px solid rgb(255 255 255 / 0.1);
+    background-color: rgb(255 255 255 / calc(0.05 * var(--glass-opacity) / 30));
+    backdrop-filter: blur(calc(24px * var(--glass-blur) / 16));
   }
   .mist-glass-strong {
-    @apply rounded-2xl border border-white/15 bg-white/[0.08] backdrop-blur-2xl;
+    border-radius: 1rem;
+    border: 1px solid rgb(255 255 255 / 0.15);
+    background-color: rgb(255 255 255 / calc(0.08 * var(--glass-opacity) / 30));
+    backdrop-filter: blur(calc(40px * var(--glass-blur) / 16));
   }
   .mist-glass-soft {
-    @apply rounded-xl border border-white/5 bg-white/[0.03] backdrop-blur-md;
+    border-radius: 0.75rem;
+    border: 1px solid rgb(255 255 255 / 0.05);
+    background-color: rgb(255 255 255 / calc(0.03 * var(--glass-opacity) / 30));
+    backdrop-filter: blur(calc(12px * var(--glass-blur) / 16));
   }
   .mist-glass-hover {
-    @apply transition-colors duration-200 hover:border-white/25 hover:bg-white/[0.08];
+    transition:
+      background-color 200ms var(--mist-ease-out),
+      border-color 200ms var(--mist-ease-out);
+  }
+  .mist-glass-hover:hover {
+    border-color: rgb(255 255 255 / 0.25);
+    background-color: rgb(255 255 255 / calc(0.08 * var(--glass-opacity) / 30));
   }
 
   /* ---- scrollbars ---- */
@@ -142,8 +173,10 @@
     mask-image: radial-gradient(ellipse 90% 70% at 50% 30%, black 30%, transparent 75%);
   }
 
+  /* follows the accent token since v-redesign (name kept for compat — it
+     is THE primary glow, whatever hue the owner picked) */
   .text-glow-purple {
-    text-shadow: 0 0 18px rgba(192, 132, 252, 0.45);
+    text-shadow: 0 0 18px color-mix(in srgb, var(--accent-color) 45%, transparent);
   }
   .text-glow-emerald {
     text-shadow: 0 0 18px rgba(52, 211, 153, 0.45);
@@ -208,7 +241,7 @@
 }
 /* expanding box-shadow ripple (Manus statusPulse) */
 @keyframes mist-ripple-ring {
-  0% { box-shadow: 0 0 0 0 var(--mist-ripple-color, rgba(192, 132, 252, 0.4)); }
+  0% { box-shadow: 0 0 0 0 var(--mist-ripple-color, color-mix(in srgb, var(--accent-color) 40%, transparent)); }
   100% { box-shadow: 0 0 0 12px transparent; }
 }
 /* sensor-refresh sweep line over a panel */
@@ -336,7 +369,7 @@
   background: linear-gradient(
     90deg,
     rgba(148, 163, 184, 0.6) 20%,
-    var(--mist-shimmer-color, #c084fc) 50%,
+    var(--mist-shimmer-color, var(--accent-color)) 50%,
     rgba(148, 163, 184, 0.6) 80%
   );
   background-size: 200% 100%;
@@ -388,7 +421,7 @@
   top: -3%;
   height: 2px;
   pointer-events: none;
-  background: linear-gradient(90deg, transparent, var(--mist-shimmer-color, #c084fc), transparent);
+  background: linear-gradient(90deg, transparent, var(--mist-shimmer-color, var(--accent-color)), transparent);
   animation: mist-scan-sweep 0.9s var(--mist-ease-out) 1 both;
 }
 /* conic border beam for the active/hot panel */
@@ -403,7 +436,7 @@
     from var(--mist-beam-angle),
     transparent 0deg,
     transparent 250deg,
-    rgba(192, 132, 252, 0.9) 308deg,
+    color-mix(in srgb, var(--accent-color) 90%, transparent) 308deg,
     rgba(94, 234, 212, 0.7) 334deg,
     transparent 360deg
   );

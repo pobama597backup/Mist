@@ -9,9 +9,12 @@
 // Approve/Deny actions and a per-item "remember" switch that maps onto
 // {decision, remember: always_approve|always_deny}.
 //
-// Polls GET /api/mist/approvals every 30s + refreshes on open. Decisions
-// POST optimistically with rollback + toast on failure. Honest states all
-// the way down: empty queue renders "nothing awaiting your call".
+// Polls GET /api/mist/approvals → Phase 4-a · R11: the 30s interval is GONE
+// — the shared events channel drives refreshes (a change on the `approvals`
+// topic → one fetch; the post-reconnect snapshot catches up after hidden
+// pauses). Decisions POST optimistically with rollback + toast on failure.
+// Honest states all the way down: empty queue renders "nothing awaiting
+// your call".
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -22,18 +25,26 @@ import { Switch } from '@/components/ui/switch'
 import { Skeleton } from '@/components/ui/skeleton'
 import { listApprovals, decideApproval, relAge, type ApprovalItem } from '@/lib/oj/ui-api'
 import { useMistStore } from '@/lib/store'
+import { subscribeMistEvents } from '@/hooks/use-events'
+import { shouldRefetch } from '@/lib/events-protocol'
 import { cn } from '@/lib/utils'
 
-const POLL_MS = 30_000
 
 const TIER_BADGE: Record<string, string> = {
   auto: 'border-white/15 bg-white/5 text-slate-400',
   standard: 'border-amber-300/30 bg-amber-300/10 text-amber-200',
   destructive: 'border-rose-400/30 bg-rose-400/10 text-rose-300',
+  // Phase 2-b Arbiter tiers (risk-classed asks): high side effects get the
+  // destructive styling, medium the amber, low stays quiet
+  high: 'border-rose-400/30 bg-rose-400/10 text-rose-300',
+  medium: 'border-amber-300/30 bg-amber-300/10 text-amber-200',
+  low: 'border-white/15 bg-white/5 text-slate-400',
 }
 
 const STATUS_BADGE: Record<string, string> = {
   approved: 'border-emerald-300/25 bg-emerald-300/5 text-emerald-300/80',
+  // Phase 2-b: a tool_exec approval the owner OK'd that then EXECUTED once
+  consumed: 'border-emerald-300/25 bg-emerald-300/10 text-emerald-300',
   denied: 'border-rose-300/25 bg-rose-300/5 text-rose-300/80',
   expired: 'border-white/10 bg-white/5 text-slate-500',
 }
@@ -140,14 +151,18 @@ export function ApprovalBell() {
     }
   }, [])
 
-  // poll every 30s while mounted (kickoff deferred a macrotask — the
-  // chat-panel composer-restore pattern — so no setState rides the effect body)
+  // kickoff on mount (deferred a macrotask — the chat-panel
+  // composer-restore pattern — so no setState rides the effect body), then
+  // the events channel owns refreshes: one fetch per `approvals` change,
+  // never on heartbeats (Phase 4-a · R11)
   useEffect(() => {
     const kickoff = window.setTimeout(() => void refresh(), 0)
-    const t = window.setInterval(() => void refresh(), POLL_MS)
+    const unsubEvents = subscribeMistEvents((ev) => {
+      if (shouldRefetch(ev, 'approvals')) void refresh()
+    })
     return () => {
+      unsubEvents()
       window.clearTimeout(kickoff)
-      window.clearInterval(t)
     }
   }, [refresh])
 

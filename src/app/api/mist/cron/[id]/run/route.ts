@@ -9,21 +9,27 @@
 // one_time jobs disabled after firing).
 import { NextRequest, NextResponse } from 'next/server'
 import { runCronJobNow } from '@/lib/services/scheduler-service'
+import { routeError } from '@/lib/route-error'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
 export async function POST(_request: NextRequest, ctx: { params: Promise<{ id: string }> }) {
-  const { id } = await ctx.params
-  const res = await runCronJobNow(id)
-  if (res.ok) {
-    return NextResponse.json({ ok: true, result: res.result ?? '' })
+  // Phase 3-a · R12: JSON errors only — never an HTML 500 page.
+  try {
+    const { id } = await ctx.params
+    const res = await runCronJobNow(id)
+    if (res.ok) {
+      return NextResponse.json({ ok: true, result: res.result ?? '' })
+    }
+    if (res.error === 'job not found') {
+      return NextResponse.json({ ok: false, error: res.error }, { status: 404 })
+    }
+    if (res.error === 'job is already running') {
+      return NextResponse.json({ ok: false, error: res.error }, { status: 409 })
+    }
+    return NextResponse.json({ ok: false, error: res.error ?? 'failed to run job' }, { status: 500 })
+  } catch (err) {
+    return routeError(err, 'cron run failed')
   }
-  if (res.error === 'job not found') {
-    return NextResponse.json({ ok: false, error: res.error }, { status: 404 })
-  }
-  if (res.error === 'job is already running') {
-    return NextResponse.json({ ok: false, error: res.error }, { status: 409 })
-  }
-  return NextResponse.json({ ok: false, error: res.error ?? 'failed to run job' }, { status: 500 })
 }

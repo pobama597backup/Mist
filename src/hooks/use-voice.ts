@@ -20,9 +20,12 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { toast } from 'sonner'
 import { useMistStore } from '@/lib/store'
+import { useAudioSession, type AudioSessionState } from '@/lib/audio-session'
+import { publishMicEnergy } from '@/lib/audio-bus'
 import { mistSpeech, getVoiceMode, subtitleBus, type IncrementalSpeech } from '@/lib/speech'
 import { useNeural, type ThoughtPayload } from '@/hooks/use-neural'
 import { mistApi, ApiError } from '@/lib/mist-api'
+import { matchVoiceConfirm, shouldApproveByVoice } from '@/lib/voice-confirm'
 import { createWavRecorder, type WavRecorder } from '@/lib/services/voice-local'
 import { startBargeInProbe, type BargeInProbe } from '@/lib/echo-guard'
 import type { ConsciousnessChunkMsg, ConsciousnessResponseMsg, HistoryMessage } from '@/lib/types'
@@ -108,64 +111,8 @@ export function micDeniedGuidance(): string {
 /** True while a hands-free voice session owns the mic (wake word pauses). */
 let voiceSessionActiveFlag = false
 
-/** Utterances that politely end a hands-free session. w9: interpreted as an
- *  ender only when the WHOLE utterance is short (≤3 words) — "how do I stop
- *  procrastinating" is a task, not a goodbye. Quiet equivalents (be quiet,
- *  shh, hush…) follow the same rule: silence NOW, but only when clearly
- *  addressed to her. */
-const STOP_PHRASE =
-  /\b(stop|goodbye|bye|that'?s all|thank you mist|sleep|be quiet|quiet|sh+|silence|hush|enough|never ?mind|forget it|that'?s it)\b/i
-
-/** A short utterance is an ender only as a whole — see STOP_PHRASE. */
-const ENDER_MAX_WORDS = 3
-
-function isSessionEnder(text: string): boolean {
-  return text.split(/\s+/).filter(Boolean).length <= ENDER_MAX_WORDS && STOP_PHRASE.test(text)
-}
-
-// ── w9 backchannels — small vocalizations that are NOT turns ────────────────
-// A "mm-hmm" while she listens is a nod, not a request: sending it to the LLM
-// would answer a conversation that never started. Pure acknowledgments,
-// fillers and laughter (≤2 words) are absorbed and she keeps listening —
-// UNLESS her last turn ended with a question (then "yeah" IS the answer).
-const BACKCHANNEL_RE =
-  /^(?:m+|hm+|mhm|mm[- ]?hmm|uh[- ]?huh|uh+|um+|er+|ah+|oh|yeah|yep|yup|ya|ok|okay|k|okey|right|sure|got it|i see|haha+|hehe+|hah|lol|lmao|teehee|wow)\.?$/i
-function isBackchannel(text: string): boolean {
-  const t = text.toLowerCase().replace(/[!,.]+$/g, '').trim()
-  const words = t.split(/\s+/).filter(Boolean)
-  if (words.length === 0 || words.length > 2) return false
-  if (BACKCHANNEL_RE.test(t)) return true
-  // laughter runs: "hahaha" / "hehehehe" normalize to their stem
-  const norm = t.replace(/ha(?:ha)+/g, 'haha').replace(/he(?:he)+/g, 'hehe')
-  return norm !== t && BACKCHANNEL_RE.test(norm)
-}
-
-function lastAssistantEndedWithQuestion(history: HistoryMessage[]): boolean {
-  for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i].role === 'assistant') return (history[i].content ?? '').trimEnd().endsWith('?')
-  }
-  return false
-}
-
-// ── w9 pause handling — adaptive end-of-turn evidence ───────────────────────
-// The browser's endpointer finalizes on its own silence guess; a finalized
-// chunk alone is NOT proof the turn ended. She holds it through a grace
-// window and keeps listening: resumed speech MERGES into the same turn
-// instead of aborting her reply. Stronger evidence → shorter hold: terminal
-// punctuation ~850ms; a comma or a hanging tail-word ("and", "so", "the"…)
-// is mid-thought ~1500ms; unpunctuated speech sits between at ~1100ms.
-const TRAILING_TAIL =
-  /\b(and|but|or|so|because|if|when|then|also|plus|the|a|an|to|of|with|for|we|i|you|they|it|is|are|was|were|will|can)\b[?.!]?$/i
-function graceMs(text: string): number {
-  const t = text.trimEnd()
-  if (/[,;:—–-]\s*$/.test(t)) return 1500
-  if (TRAILING_TAIL.test(t)) return 1500
-  if (/[.!?…]["')\]]?$/.test(t)) return 850
-  return 1100
-}
-/** Pause-continuation cap: after this many merges the reply is overdue —
- *  the held text dispatches on the next final instead of holding again. */
-const MAX_PAUSE_MERGES = 3
+/** Utterances that politely end a hands-free session. */
+const STOP_PHRASE = /\b(stop|goodbye|that's all|thank you mist|sleep)\b/i
 
 const FAREWELL = "Until next time — I'll be right here."
 
@@ -336,6 +283,47 @@ function wakeHit() {
   toast.success('Mist heard you — listening', { duration: 4000 })
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2-d · S14 — the SPOKEN confirm for voice-originated approvals.
+// Every voice transcript lands in handleUtterance (below): the recognizer's
+// onresult, the hold-to-talk fallback, local whisper and the server STT path
+// all funnel through submit() → handleUtterance. When the utterance is the
+// owner's confirm phrase (NOT the wake word) and a voice-originated Approval
+// is pending within its 60s window, the phrase DECIDES that approval instead
+// of becoming a new thought. Pure half: src/lib/voice-confirm.ts.
+// ---------------------------------------------------------------------------
+
+interface PendingApprovalLike {
+  id: string
+  createdAt: string
+  payload?: { origin?: string }
+}
+
+/** Try to decide a pending voice approval by the spoken confirm phrase.
+ * The pure pre-check runs FIRST (zero network for normal chatter); only a
+ * bare-phrase utterance looks for a pending voice approval. */
+async function tryVoiceConfirm(text: string): Promise<boolean> {
+  if (!matchVoiceConfirm(text)) return false
+  try {
+    const res = await fetch('/api/mist/approvals?status=pending', { cache: 'no-store' })
+    if (!res.ok) return false
+    const data = (await res.json()) as { approvals?: PendingApprovalLike[] }
+    const voice = (data.approvals ?? []).filter((a) => a.payload?.origin === 'owner_voice')
+    const pending = voice.find((a) => shouldApproveByVoice(text, a))
+    if (!pending) return false
+    const decide = await fetch(`/api/mist/approvals/${encodeURIComponent(pending.id)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve' }),
+    })
+    if (!decide.ok) return false
+    toast.success('Confirmed by voice', { description: 'Running the approved action now.' })
+    return true
+  } catch {
+    return false // a failed confirm attempt falls through as a normal utterance
+  }
+}
+
 /**
  * Background "Hey Mist" listener. Runs its own continuous recognizer while
  * `wakeWordEnabled` is on and no voice session holds the mic. Mounting it in
@@ -444,8 +432,18 @@ export function useVoiceSession(): VoiceSessionState & {
   const beginServerRef = useRef<() => void>(() => {})
   const finishServerRef = useRef<() => void>(() => {})
 
+  /** The audio-session machine mapping for a voice phase: 'error' is a
+   *  session-local terminal (the machine walks to idle — its any→idle edge);
+   *  every other phase publishes as-is. The machine is the single source of
+   *  truth for the audio state; this chokepoint is where the voice loop
+   *  publishes (every phase change in this hook flows through applySession). */
+  function publishAudioPhase(phase: VoicePhase): void {
+    useAudioSession.getState().transition(phase === 'error' ? 'idle' : (phase as AudioSessionState))
+  }
+
   const applySession = useCallback((patch: Partial<VoiceSessionState>) => {
     if (patch.active !== undefined || patch.phase !== undefined) {
+      if (patch.phase !== undefined) publishAudioPhase(patch.phase)
       sessionRef.current = {
         active: patch.active ?? sessionRef.current.active,
         phase: patch.phase ?? sessionRef.current.phase,
@@ -466,18 +464,6 @@ export function useVoiceSession(): VoiceSessionState & {
   // incremental path and the whole-text fallback behave identically.
   const incrementalRef = useRef<IncrementalSpeech | null>(null)
   const streamTextRef = useRef('')
-
-  // ---- w9 pause handling — the held utterance ----
-  // A finalized browser chunk is held here through its grace window; resumed
-  // speech merges into it (timer=null while the user talks again, re-armed
-  // when they go quiet). Explicit utterances and session end clear it.
-  const pendingUtterRef = useRef<{ text: string; timer: number | null; merges: number } | null>(null)
-
-  const clearPendingUtterance = useCallback(() => {
-    const p = pendingUtterRef.current
-    pendingUtterRef.current = null
-    if (p && p.timer !== null) window.clearTimeout(p.timer)
-  }, [])
 
   const stopBargeIn = useCallback(() => {
     const probe = bargeProbeRef.current
@@ -527,6 +513,10 @@ export function useVoiceSession(): VoiceSessionState & {
       onBargeIn: () => {
         stopBargeIn()
         if (!sessionRef.current.active || sessionRef.current.phase !== 'speaking') return
+        // the machine first walks speaking→barge-in (the mandate edge) — speech.ts's
+        // stop() then holds its hand off the machine (settleMachineIdle only fires
+        // from 'speaking'), and the re-arm below walks barge-in→listening
+        useAudioSession.getState().transition('barge-in')
         mistSpeech.stop() // zombie-chunk guard discards in-flight chunks
         if (!bargeToastShown.current) {
           bargeToastShown.current = true
@@ -557,7 +547,6 @@ export function useVoiceSession(): VoiceSessionState & {
     (opts?: { farewell?: string; error?: string }) => {
       if (!sessionRef.current.active) return
       stopBargeIn() // never leave the barge-in mic open past the session
-      clearPendingUtterance() // w9: a dying session never dispatches a held turn
       // w5: a dying session kills any streaming reply dead (audio + synth)
       if (incrementalRef.current) {
         incrementalRef.current.abort()
@@ -607,7 +596,8 @@ export function useVoiceSession(): VoiceSessionState & {
       keepaliveStop()
       mistSpeech.stop()
       sendVoiceEnergy(0) // settle the service's listening state → dormant
-      useMistStore.getState().setAudioEnergy(0)
+      // Phase 4-a · P3: the reset rides the bus — the store field is gone.
+      publishMicEnergy(0)
       voiceSessionActiveFlag = false
       wakeEngineSync() // hand the mic back to the wake listener if armed
       applySession({
@@ -621,7 +611,7 @@ export function useVoiceSession(): VoiceSessionState & {
       // respects the ttsEnabled preference like every other utterance
       if (opts?.farewell) void mistSpeech.speak(opts.farewell)
     },
-    [applySession, clearPendingUtterance, keepaliveStop, sendVoiceEnergy]
+    [applySession, keepaliveStop, sendVoiceEnergy]
   )
 
   const failSession = useCallback(
@@ -632,10 +622,7 @@ export function useVoiceSession(): VoiceSessionState & {
     [endSession]
   )
 
-  /** A final utterance: stop-phrase check → backchannel check → thinking →
-   *  send the thought. w9: called DIRECTLY only by explicit input paths
-   *  (server/local STT, hold-to-talk submit); the browser path holds its
-   *  finals through the grace window via holdFinal instead. */
+  /** A final utterance: spoken-confirm check → stop-phrase check → thinking → send the thought. */
   const handleUtterance = useCallback(
     (text: string) => {
       const clean = text.trim()
@@ -643,121 +630,82 @@ export function useVoiceSession(): VoiceSessionState & {
         scheduleRestart()
         return
       }
-      // an explicit utterance supersedes any held turn (newest input wins)
-      clearPendingUtterance()
       applySession({ lastHeard: clean })
       setHeardSeq((n) => n + 1)
-      // w9: an ender is a SHORT utterance as a whole — "how do I stop
-      // procrastinating" is a task; "stop", "shh", "be quiet" mean silent NOW
-      if (isSessionEnder(clean)) {
+      if (STOP_PHRASE.test(clean)) {
         endSession({ farewell: FAREWELL })
         return
       }
-      // w9 backchannels: a nod is not a turn — while listening, pure
-      // acknowledgments / fillers / laughter are absorbed (she keeps
-      // listening) UNLESS her last turn asked a question ("yeah" is then
-      // the answer, not a nod)
-      if (
-        sessionRef.current.phase === 'listening' &&
-        isBackchannel(clean) &&
-        !lastAssistantEndedWithQuestion(historyRef.current)
-      ) {
-        applySession({ interim: '' }) // lastHeard/heardSeq already set above
-        scheduleRestart()
-        return
-      }
-      // w5: a new utterance supersedes any streaming reply still in flight
-      // (barge-in already stopped its audio; this kills its synth pipeline)
-      if (incrementalRef.current) {
-        incrementalRef.current.abort()
-        incrementalRef.current = null
-      }
-      streamTextRef.current = ''
-      if (restartTimerRef.current !== null) {
-        window.clearTimeout(restartTimerRef.current)
-        restartTimerRef.current = null
-      }
-      keepaliveStop()
-      historyRef.current.push({ role: 'user', content: clean })
-      const history = historyRef.current.slice(-8)
-      const store = useMistStore.getState()
-      applySession({ phase: 'thinking', interim: '', streamingReply: '', error: null })
-      store.setNeuralState('processing')
-
-      // ── Mark-LV instant acknowledgment (ported 2026-09-30) ──────────────
-      // "Speaks a short, context-aware reply the instant a longer task
-      //  starts — no more silent waiting." Fires only when the utterance
-      //  looks like a genuinely long task (research/search/write/etc.) AND
-      //  voice replies are on. The real reply's speak() interrupts the ack
-      //  mid-flight if it arrives fast (newest wins, by design). Blob path
-      //  (noStream) so a quick ack never queues against the reply's stream.
-      if (store.ttsEnabled && LONG_TASK_RE.test(clean)) {
-        const ack = ACK_PHRASES[Math.floor(Math.random() * ACK_PHRASES.length)]
-        void mistSpeech.speak(ack, {
-          noStream: true,
-          // keep the orb truthful: ack ends → back to processing until the
-          // real reply starts speaking
-          onEnd: () => {
-            const s = sessionRef.current
-            if (s.active && s.phase === 'thinking') {
-              useMistStore.getState().setNeuralState('processing')
-            }
-          },
+      // Phase 2-d · S14: a bare confirm-phrase utterance is HELD while we
+      // check for a pending voice approval (window-gated). If it decides one,
+      // it NEVER becomes a thought — the session re-arms for the next
+      // utterance. Anything else flows on as the new thought.
+      if (matchVoiceConfirm(clean)) {
+        void tryVoiceConfirm(clean).then((confirmed) => {
+          if (confirmed) {
+            scheduleRestart()
+            return
+          }
+          sendUtterance(clean)
         })
+        return
       }
+      sendUtterance(clean)
 
-      sendThought({
-        content: clean,
-        provider: store.provider,
-        conversation_id: store.threads.activeId ?? undefined,
-        history,
-        mode: 'voice',
-      } as ThoughtPayload)
+      function sendUtterance(utterance: string): void {
+        // w5: a new utterance supersedes any streaming reply still in flight
+        // (barge-in already stopped its audio; this kills its synth pipeline)
+        if (incrementalRef.current) {
+          incrementalRef.current.abort()
+          incrementalRef.current = null
+        }
+        streamTextRef.current = ''
+        if (restartTimerRef.current !== null) {
+          window.clearTimeout(restartTimerRef.current)
+          restartTimerRef.current = null
+        }
+        keepaliveStop()
+        historyRef.current.push({ role: 'user', content: utterance })
+        const history = historyRef.current.slice(-8)
+        const store = useMistStore.getState()
+        applySession({ phase: 'thinking', interim: '', streamingReply: '', error: null })
+        store.setNeuralState('processing')
+
+        // ── Mark-LV instant acknowledgment (ported 2026-09-30) ────────────
+        // "Speaks a short, context-aware reply the instant a longer task
+        //  starts — no more silent waiting." Fires only when the utterance
+        //  looks like a genuinely long task (research/search/write/etc.) AND
+        //  voice replies are on. The real reply's speak() interrupts the ack
+        //  mid-flight if it arrives fast (newest wins, by design). Blob path
+        //  (noStream) so a quick ack never queues against the reply's stream.
+        if (store.ttsEnabled && LONG_TASK_RE.test(utterance)) {
+          const ack = ACK_PHRASES[Math.floor(Math.random() * ACK_PHRASES.length)]
+          void mistSpeech.speak(ack, {
+            noStream: true,
+            // keep the orb truthful: ack ends → back to processing until the
+            // real reply starts speaking
+            onEnd: () => {
+              const s = sessionRef.current
+              if (s.active && s.phase === 'thinking') {
+                useMistStore.getState().setNeuralState('processing')
+                // the ack's natural end walked the machine idle — the session
+                // is still thinking, so it goes back (idle→thinking edge)
+                useAudioSession.getState().transition('thinking')
+              }
+            },
+          })
+        }
+
+        sendThought({
+          content: utterance,
+          provider: store.provider,
+          conversation_id: store.threads.activeId ?? undefined,
+          history,
+          mode: 'voice',
+        } as ThoughtPayload)
+      }
     },
-    [applySession, clearPendingUtterance, endSession, keepaliveStop, scheduleRestart, sendThought]
-  )
-
-  // ---- w9 pause handling — the grace window ----
-
-  /** The grace window lapsed in silence: the held turn is real, dispatch it. */
-  const dispatchHeld = useCallback(() => {
-    const p = pendingUtterRef.current
-    pendingUtterRef.current = null
-    if (p) handleUtterance(p.text)
-  }, [handleUtterance])
-
-  /** w9: a finalized browser chunk arrives — hold it through the grace
-   *  window (keep listening) instead of answering instantly. Resumed
-   * speech merges into the held text; enders and the merge cap dispatch
-   * immediately. Called from beginRecognition's onresult. */
-  const holdFinal = useCallback(
-    (text: string) => {
-      const clean = text.trim()
-      if (!clean) {
-        scheduleRestart()
-        return
-      }
-      const prev = pendingUtterRef.current
-      const merged = prev ? `${prev.text} ${clean}` : clean
-      const merges = prev ? prev.merges + 1 : 0
-      if (prev && prev.timer !== null) window.clearTimeout(prev.timer)
-      pendingUtterRef.current = null
-      // clear enders need no grace — "stop" means silent NOW
-      if (isSessionEnder(merged)) {
-        handleUtterance(merged)
-        return
-      }
-      // pause-continuation cap — the reply is overdue, let it go
-      if (merges > MAX_PAUSE_MERGES) {
-        handleUtterance(merged)
-        return
-      }
-      const timer = window.setTimeout(() => dispatchHeld(), graceMs(merged))
-      pendingUtterRef.current = { text: merged, timer, merges }
-      // show what she heard while she waits out the pause
-      applySession({ interim: merged })
-    },
-    [applySession, dispatchHeld, handleUtterance, scheduleRestart]
+    [applySession, endSession, keepaliveStop, scheduleRestart, sendThought]
   )
 
   const handleRecError = useCallback(
@@ -833,19 +781,7 @@ export function useVoiceSession(): VoiceSessionState & {
         if (r.isFinal) final += alt.transcript
         else interim += alt.transcript
       }
-      // w9 pause handling: resumed speech inside a grace window proves the
-      // user is STILL talking — stop the hold clock (the merge happens at
-      // this segment's final; if they go quiet without one, onend re-arms)
-      const held = pendingUtterRef.current
-      if (interim) {
-        if (held) {
-          if (held.timer !== null) window.clearTimeout(held.timer)
-          pendingUtterRef.current = { ...held, timer: null }
-          applySession({ interim: `${held.text} ${interim}` })
-        } else {
-          applySession({ interim })
-        }
-      }
+      if (interim) applySession({ interim })
       const text = final.trim()
       if (text) {
         try {
@@ -853,9 +789,7 @@ export function useVoiceSession(): VoiceSessionState & {
         } catch {
           /* already stopping */
         }
-        // w9: hold the final through the grace window (merge/extend any
-        // held text) — brief browser silence is not end-of-turn evidence
-        holdFinal(text)
+        handleUtterance(text)
       }
     }
     rec.onerror = (e) => handleRecError(e.error)
@@ -863,13 +797,6 @@ export function useVoiceSession(): VoiceSessionState & {
       if (recRef.current === rec) recRef.current = null
       // continuous=false ends after a final result or silence — keep looping
       scheduleRestart()
-      // w9: the user resumed inside a grace window and went quiet again
-      // without a new final — re-arm the hold so their continuation still
-      // lands as ONE turn
-      const held = pendingUtterRef.current
-      if (held && held.timer === null) {
-        held.timer = window.setTimeout(() => dispatchHeld(), graceMs(held.text))
-      }
     }
     recRef.current = rec
     try {
@@ -877,7 +804,7 @@ export function useVoiceSession(): VoiceSessionState & {
     } catch {
       // InvalidStateError — a start is already pending; onend will re-arm
     }
-  }, [applySession, dispatchHeld, handleRecError, holdFinal, scheduleRestart])
+  }, [applySession, handleRecError, handleUtterance, scheduleRestart])
 
   useEffect(() => {
     beginRef.current = beginRecognition
@@ -1147,7 +1074,7 @@ export function useVoiceSession(): VoiceSessionState & {
     voiceSessionActiveFlag = true
     wakeEngineSync() // pause the wake listener — the session owns the mic now
     const store = useMistStore.getState()
-    store.setAudioEnergy(0)
+    publishMicEnergy(0)
     applySession({
       active: true,
       phase: 'listening',

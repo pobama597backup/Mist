@@ -1,7 +1,30 @@
-// M.I.S.T. vector memory — local lexical engine (TF-cosine + bigram overlap), zero deps.
-// Everything degrades gracefully: empty/missing data returns [].
+// M.I.S.T. vector memory — NAMING HONESTY (Phase 4-b · P6): despite the
+// historical `vector*` names (kept for API/type compatibility — renaming the
+// exports would churn every caller for zero behavior change), this engine is
+// purely LEXICAL: TF-cosine + bigram overlap over token bags. There are NO
+// embeddings here — an embedding model is not installed. Tokenization uses
+// Intl.Segmenter('en', {granularity:'word'}) where the runtime provides it
+// (proper word boundaries for CJK/punctuation-adjacent words) and falls back
+// to the historical [a-z0-9] regex split elsewhere. Everything degrades
+// gracefully: empty/missing data returns [].
 import { db } from '@/lib/db'
 import type { VectorSearchResult } from '@/lib/types'
+
+/** Lazily-created word segmenter (null on runtimes without Intl.Segmenter). */
+const wordSegmenter: Intl.Segmenter | null =
+  typeof Intl !== 'undefined' && typeof (Intl as { Segmenter?: unknown }).Segmenter === 'function'
+    ? new Intl.Segmenter('en', { granularity: 'word' })
+    : null
+
+/** Fast string hash (FNV-1a, 32-bit) — the dedupe key for token sets. */
+function hashToken(t: string): number {
+  let h = 0x811c9dc5
+  for (let i = 0; i < t.length; i++) {
+    h ^= t.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return h >>> 0
+}
 
 const STOPWORDS = new Set([
   'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'else', 'of', 'to', 'in', 'on', 'at', 'by',
@@ -14,12 +37,41 @@ const STOPWORDS = new Set([
   'each', 'few', 'more', 'most', 'other', 'some', 'such', 'only', 'own', 'same', 'there', 'here',
 ])
 
-/** Tokenize: lowercase, split on non-alphanumerics, drop <2 chars and stopwords. */
+/** Tokenize: lowercase, word-segment (Intl.Segmenter when available, else the
+ *  historical [a-z0-9] regex fallback), drop <2 chars and stopwords. Keeps
+ *  DUPLICATES — term frequency needs counts. */
 export function tokenize(text: string): string[] {
-  return text
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((t) => t.length >= 2 && !STOPWORDS.has(t))
+  const lower = text.toLowerCase()
+  let raw: string[]
+  if (wordSegmenter) {
+    raw = []
+    for (const seg of wordSegmenter.segment(lower)) {
+      if (seg.isWordLike) raw.push(seg.segment)
+    }
+  } else {
+    raw = lower.split(/[^a-z0-9]+/)
+  }
+  return raw.filter((t) => t.length >= 2 && !STOPWORDS.has(t))
+}
+
+/** Hash-dedupe a token list (order-preserving first-seen wins). Membership
+ *  consumers (skill-trigger matching, capability_check, top-k tool scoring)
+ *  never need counts — deduping shrinks the Set they build anyway. */
+export function dedupeTokens(tokens: string[]): string[] {
+  const seen = new Set<number>()
+  const out: string[] = []
+  for (const t of tokens) {
+    const h = hashToken(t)
+    if (seen.has(h)) continue
+    seen.add(h)
+    out.push(t)
+  }
+  return out
+}
+
+/** Tokenize + hash-dedupe in one step — the membership-shape of tokenize. */
+export function tokenSet(text: string): string[] {
+  return dedupeTokens(tokenize(text))
 }
 
 function termFrequency(tokens: string[]): Map<string, number> {
@@ -79,7 +131,8 @@ function safeParseMetadata(raw: string): Record<string, unknown> {
   }
 }
 
-/** Lexical search over VectorMemory (scan capped at 500 most recent rows). */
+/** Lexical (NOT embedding) search over VectorMemory (scan capped at 500 most
+ *  recent rows). Kept the historical name — see the module header. */
 export async function vectorSearch(query: string, n: number): Promise<VectorSearchResult[]> {
   try {
     if (!query.trim()) return []

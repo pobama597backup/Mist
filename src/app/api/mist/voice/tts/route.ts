@@ -1,10 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { synthesizeSpeech } from '@/lib/services/voice-service'
+import { checkRateLimit, rateLimitResponse } from '@/lib/perimeter/rate-limit'
+import { getGlobalCandorMode } from '@/lib/services/candor-service'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
 export async function POST(req: NextRequest) {
+  // Phase 1 · S12: voice lane (TTS) — 60/min per session.
+  const rl = checkRateLimit('voice', req)
+  if (!rl.ok) return rateLimitResponse('voice', rl.retryAfter ?? 1)
+  // Phase 5 · C2 (Unfiltered): cloud STT/TTS engines are OFF — the GLM and
+  // keyless engines all leave the machine. The local voice path (the bridge's
+  // Piper TTS, /api/mist/voice/local/tts) stays open. Honest refusal, never a
+  // silent cloud fallback.
+  if ((await getGlobalCandorMode()) === 'unfiltered') {
+    return NextResponse.json(
+      {
+        error:
+          'voice is local-only in Unfiltered — the cloud TTS engines are off (no cloud egress while the dial is Unfiltered). Connect a local voice engine via the bridge, or switch the dial.',
+      },
+      { status: 403 }
+    )
+  }
   try {
     const body = (await req.json().catch(() => null)) as {
       text?: unknown

@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
       voice = body.voice.trim()
     }
 
-    const res = await bridgeExec('voice_tts', { text: body.text, ...(voice ? { voice } : {}) })
+    const res = await bridgeExec('voice_tts', { text: body.text, ...(voice ? { voice } : {}) }, { origin: 'owner_voice' }) // Phase 2-b
     if (!res.bridgeConnected) {
       return NextResponse.json(
         { error: 'bridge-disconnected', bridgeConnected: false },

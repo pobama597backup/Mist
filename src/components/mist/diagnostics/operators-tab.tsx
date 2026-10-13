@@ -211,7 +211,10 @@ export function OperatorsTab() {
   }, [])
 
   useEffect(() => {
-    refresh()
+    // deferred to a macrotask — refresh() reaches setState from the effect's
+    // sync frame per the lint rule
+    const id = window.setTimeout(() => void refresh(), 0)
+    return () => window.clearTimeout(id)
   }, [refresh])
 
   const runOperatorAction = async (slug: string, action: 'run' | 'pause' | 'resume') => {

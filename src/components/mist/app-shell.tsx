@@ -6,6 +6,7 @@
 'use client'
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import dynamic from 'next/dynamic'
 import { motion } from 'framer-motion'
 import { toast } from 'sonner'
 import { useMistStore } from '@/lib/store'
@@ -15,21 +16,93 @@ import { useWakeWord } from '@/hooks/use-voice'
 import { welcomeCheck, pingSeen } from '@/lib/welcome-client'
 import { useFaceBusEmitter } from '@/hooks/use-face-bus'
 import { useKeyboardShortcuts } from '@/hooks/use-keyboard-shortcuts'
+import { useMistEventsChannel } from '@/hooks/use-events'
 import { MistNavbar } from '@/components/mist/navbar'
 import { VoiceStage } from '@/components/mist/consciousness/voice-stage'
 import { ChatView } from '@/components/mist/chat/chat-view'
-import { SelfView } from '@/components/mist/self/self-view'
-import { SettingsView } from '@/components/mist/settings/settings-view'
 import { DiagnosticsDrawer } from '@/components/mist/diagnostics/drawer'
 import { StatusBar } from '@/components/mist/status-bar'
-import { BrowserWindow } from '@/components/mist/browser-window'
 import { FloatingOrb } from '@/components/mist/floating-orb'
 import { Starfield } from '@/components/mist/starfield'
+import { Skeleton } from '@/components/ui/skeleton'
 // oj-face-5 — OpenJarvis UX surfaces: ambient activity pulse, the tiered
 // approval gate chip and the Ctrl+Shift+P power palette
 import { SystemPulse } from '@/components/mist/system-pulse'
 import { ApprovalBell } from '@/components/mist/approval-bell'
-import { MistPowerPalette } from '@/components/mist/command-palette'
+
+// ----------------------------------------------------------------
+// Phase 4-a · P1 (dynamic imports) — heavy, rarely-visited surfaces load on
+// first use instead of app boot. Every one is client-only with a skeleton.
+// ----------------------------------------------------------------
+
+/** Shared page skeleton while a lazily-loading view's chunk arrives. */
+function ViewSkeleton() {
+  return (
+    <div className="space-y-4 p-2" aria-hidden>
+      <Skeleton className="h-28 w-full rounded-2xl bg-white/5" />
+      <Skeleton className="h-14 w-2/3 rounded-xl bg-white/5" />
+      <Skeleton className="h-14 w-1/2 rounded-xl bg-white/5" />
+    </div>
+  )
+}
+
+const SelfView = dynamic(() => import('@/components/mist/self/self-view').then((m) => m.SelfView), {
+  ssr: false,
+  loading: ViewSkeleton,
+})
+const SettingsView = dynamic(
+  () => import('@/components/mist/settings/settings-view').then((m) => m.SettingsView),
+  { ssr: false, loading: ViewSkeleton }
+)
+const BrowserWindow = dynamic(
+  () => import('@/components/mist/browser-window').then((m) => m.BrowserWindow),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="fixed inset-x-0 top-16 bottom-14 z-40 mx-auto max-w-5xl p-3" aria-hidden>
+        <Skeleton className="h-full w-full rounded-2xl bg-white/5" />
+      </div>
+    ),
+  }
+)
+const MistPowerPalette = dynamic(
+  () => import('@/components/mist/command-palette').then((m) => m.MistPowerPalette),
+  { ssr: false }
+)
+
+/** The in-app browser mounts only after the first tab is opened, then stays
+ *  mounted for the session (its own AnimatePresence handles visibility, and
+ *  the mount survives close animations of the LAST tab). */
+function BrowserWindowLazy() {
+  const browserOpen = useMistStore((s) => s.browser.open)
+  const [everOpened, setEverOpened] = useState(false)
+  useEffect(() => {
+    if (!browserOpen) return
+    // macrotask latch — the effect body stays free of synchronous setState
+    const id = window.setTimeout(() => setEverOpened(true), 0)
+    return () => window.clearTimeout(id)
+  }, [browserOpen])
+  if (!everOpened) return null
+  return <BrowserWindow />
+}
+
+/** Ctrl+Shift+P gate — owns the keystroke so the palette chunk loads only
+ *  after the first press; every press toggles the palette via openRequest. */
+function PowerPaletteGate() {
+  const [seq, setSeq] = useState(0)
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyP') {
+        e.preventDefault()
+        setSeq((n) => n + 1)
+      }
+    }
+    document.addEventListener('keydown', down)
+    return () => document.removeEventListener('keydown', down)
+  }, [])
+  if (seq === 0) return null
+  return <MistPowerPalette openRequest={seq} />
+}
 
 function BackgroundFX() {
   return (
@@ -57,14 +130,22 @@ function BackgroundFX() {
 }
 
 /** Staged boot sequence — deterministic markup (identical SSR/client), all
- *  choreography via CSS animation delays. Click or the skip button proceeds. */
+ *  choreography via CSS animation delays. Click or the skip button proceeds.
+ *
+ *  Phase 3-a · R2 (telemetry truth): the labels carry only VERIFIABLE STATIC
+ *  FACTS (:3003 is the real neural-service port; 6 is the real synapse
+ *  channel count). The old variable counts ("cortex providers 8", "tool
+ *  registry 21+" — stale even as theater, 143 tools live) are gone: live
+ *  counts belong to the live surfaces (status bar polls /api/mist/health,
+ *  the tools tab lists the real registry). The [ OK ] marks are boot
+ *  choreography, not measurement claims. */
 function BootSequence({ onSkip }: { onSkip: () => void }) {
   const lines = [
     { label: 'neural link :3003', delay: 300 },
-    { label: 'cortex providers 8', delay: 520 },
+    { label: 'cortex lanes', delay: 520 },
     { label: 'synapse channels 6', delay: 740 },
     { label: 'memory vault', delay: 960 },
-    { label: 'tool registry 21+', delay: 1180 },
+    { label: 'tool registry', delay: 1180 },
   ]
   const segments = Array.from({ length: 22 }, (_, i) => i)
 
@@ -184,7 +265,11 @@ export function MistAppShell() {
   useKeyboardShortcuts()
 
   // single backend health poll for the whole app (navbar + statusbar read store)
-  useBackendStatus(10000)
+  // → Phase 4-a · R11: this is now the shared EVENTS channel mount — one
+  // EventSource for the whole app (alerts delivery, approval bell, CORE
+  // health) that pauses while the tab is hidden and reports mounted panels.
+  useBackendStatus()
+  useMistEventsChannel()
   // heartbeat alert delivery — ⏰ reminders + 📦 releases land in the chat
   useMistAlerts()
 
@@ -264,6 +349,21 @@ export function MistAppShell() {
     document.documentElement.dataset.motion = storeReduced ? 'calm' : 'full'
   }, [storeReduced])
 
+  // v-redesign: mirror the Appearance prefs (accent + glass) onto <html> custom
+  // properties so the CSS glass/glow system consumes them app-wide — the same
+  // pattern as the data-motion mirror above. Previously only Settings wrote
+  // these vars (and nothing read them); now they apply from boot, survive
+  // reloads, and update live from the Settings sliders.
+  const glassOpacity = useMistStore((s) => s.glassOpacity)
+  const glassBlur = useMistStore((s) => s.glassBlur)
+  const accentColor = useMistStore((s) => s.accentColor)
+  useEffect(() => {
+    const root = document.documentElement
+    root.style.setProperty('--glass-opacity', String(glassOpacity))
+    root.style.setProperty('--glass-blur', String(glassBlur))
+    root.style.setProperty('--accent-color', accentColor)
+  }, [glassOpacity, glassBlur, accentColor])
+
   // Welcome-back briefing (w4 — Mark-LV's morning-briefing pattern, ours):
   // once the console has iris-opened, she checks whether a greeting is
   // warranted (away > 20 min, or a server restart) and — never dormant —
@@ -334,9 +434,9 @@ export function MistAppShell() {
       </main>
       <StatusBar />
       <DiagnosticsDrawer />
-      <BrowserWindow />
+      <BrowserWindowLazy />
       {/* Ctrl+Shift+P power palette — models · tools · actions */}
-      <MistPowerPalette />
+      <PowerPaletteGate />
       {/* mini companion orb — floats above the status bar on every view except
           Consciousness (self-hiding) and while the browser window is open */}
       <FloatingOrb />

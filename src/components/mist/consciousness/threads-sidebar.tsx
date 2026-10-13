@@ -2,6 +2,8 @@
 
 // M.I.S.T. — ThreadsSidebar: conversation list backed by mistApi.conversations.
 // Reloads on store.threadsRefreshSeq bumps; skeletons on first load only.
+// ui-6: active thread = left accent border + tint; full-width primary
+// New thread button pinned above the scrolling list.
 // Task 3-b · frontend core
 
 import { useCallback, useEffect, useState } from 'react'
@@ -51,7 +53,9 @@ export function ThreadsSidebar({ className }: { className?: string }) {
   }, [setThreads, threadsLoading])
 
   useEffect(() => {
-    void load()
+    // deferred to a macrotask — load() setStates synchronously (threadsLoading)
+    const id = window.setTimeout(() => void load(), 0)
+    return () => window.clearTimeout(id)
   }, [load, refreshSeq])
 
   const create = async () => {
@@ -72,18 +76,20 @@ export function ThreadsSidebar({ className }: { className?: string }) {
 
   return (
     <div className={cn('flex h-full min-w-0 flex-col gap-2', className)}>
-      <div className="flex items-center justify-between pr-1">
-        <span className="font-mono text-[10px] tracking-[0.25em] text-slate-500">THREADS</span>
-        <button
-          type="button"
-          onClick={() => void create()}
-          disabled={creating}
-          aria-label="New thread"
-          className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-white/5 hover:text-purple-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60 disabled:opacity-50"
-        >
-          <Plus aria-hidden className="h-4 w-4" />
-        </button>
-      </div>
+      {/* New thread — the sidebar's PRIMARY action: full-width and pinned
+          above the list (the list is its own overflow child, so the button
+          stays visible no matter how far the list scrolls). */}
+      <button
+        type="button"
+        onClick={() => void create()}
+        disabled={creating}
+        aria-label="New thread"
+        className="flex h-10 w-full shrink-0 items-center justify-center gap-2 rounded-xl border border-purple-400/30 bg-purple-400/15 text-sm font-medium text-purple-200 transition-colors hover:bg-purple-400/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <Plus aria-hidden className="h-4 w-4" />
+        New thread
+      </button>
+      <span className="pr-1 font-mono text-[10px] tracking-[0.25em] text-slate-500">THREADS</span>
 
       {showSkeleton ? (
         <div className="space-y-1.5" aria-hidden>
@@ -115,15 +121,26 @@ export function ThreadsSidebar({ className }: { className?: string }) {
                 onClick={() => setActiveThread(t.id)}
                 aria-current={activeId === t.id ? 'true' : undefined}
                 className={cn(
-                  'w-full p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60',
+                  'group w-full min-w-0 rounded-xl p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60',
                   activeId === t.id
-                    ? 'rounded-xl border border-purple-400/40 bg-purple-400/10'
-                    : 'mist-glass-soft hover:border-white/20'
+                    ? 'border-l-2 border-purple-400 bg-white/[0.06]'
+                    : 'border-l-2 border-transparent hover:bg-white/[0.04]'
                 )}
               >
-                <span className="block truncate text-sm text-slate-200">
+                <span
+                  className={cn(
+                    'block truncate text-sm',
+                    activeId === t.id
+                      ? 'font-medium text-slate-100'
+                      : 'text-slate-400 group-hover:text-slate-200'
+                  )}
+                >
                   {t.title || 'Untitled'}
                 </span>
+                {/* secondary metadata — the list payload carries only
+                    created_at (no updatedAt/lastMessageAt/message counts in
+                    the API shape), so the relative creation time is the
+                    honest distinguisher; nothing extra is fetched. */}
                 <span className="mt-0.5 block font-mono text-[10px] text-slate-500">
                   {timeAgo(t.created_at)}
                 </span>

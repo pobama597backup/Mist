@@ -8,7 +8,7 @@
 // internally, so this view stays simple: sidebar + roomy conversation.
 // Task 12-c · chat tab
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { PanelLeft, PanelLeftClose, PanelLeftOpen, X } from 'lucide-react'
 import { useMistStore } from '@/lib/store'
@@ -29,14 +29,64 @@ export function ChatView() {
   // store.threadsCollapsed stays dedicated to the lg+ sidebar collapse).
   const [mobileThreadsOpen, setMobileThreadsOpen] = useState(false)
 
-  // Escape closes the mobile threads overlay.
+  // The overlay panel + the element to hand focus back to on close.
+  const overlayRef = useRef<HTMLDivElement | null>(null)
+  const restoreFocusRef = useRef<HTMLElement | null>(null)
+
+  // While the mobile threads overlay is open: Escape closes it, Tab is
+  // trapped inside it (focus never escapes to the page behind), body scroll
+  // is locked behind the fixed panel, and focus returns to the opener on
+  // close (the standard modal contract — backdrop click closes elsewhere).
   useEffect(() => {
     if (!mobileThreadsOpen) return
+
+    // Remember who opened us so focus can go back there on close.
+    restoreFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null
+
+    // Move focus into the dialog (deferred a macrotask so the sliding
+    // panel has mounted before we focus it).
+    const focusId = window.setTimeout(() => overlayRef.current?.focus(), 0)
+
+    // Scroll lock — the fixed overlay must not scroll the page behind it.
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMobileThreadsOpen(false)
+      if (e.key === 'Escape') {
+        setMobileThreadsOpen(false)
+        return
+      }
+      if (e.key !== 'Tab') return
+      const root = overlayRef.current
+      if (!root) return
+      const focusables = Array.from(
+        root.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+        )
+      )
+      if (focusables.length === 0) return
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      const active = document.activeElement
+      // Wrap when Tab would leave the dialog (off the ends, or when focus
+      // has drifted outside it entirely).
+      if (e.shiftKey && (active === first || !root.contains(active))) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && (active === last || !root.contains(active))) {
+        e.preventDefault()
+        first.focus()
+      }
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.clearTimeout(focusId)
+      document.body.style.overflow = prevOverflow
+      restoreFocusRef.current?.focus()
+      restoreFocusRef.current = null
+    }
   }, [mobileThreadsOpen])
 
   return (
@@ -136,9 +186,12 @@ export function ChatView() {
         {mobileThreadsOpen && (
           <motion.div
             key="chat-threads-panel"
+            ref={overlayRef}
             role="dialog"
+            aria-modal="true"
             aria-label="Threads"
-            className="mist-glass-strong fixed inset-y-0 left-0 z-40 w-80 p-4 pt-16 lg:hidden"
+            tabIndex={-1}
+            className="mist-glass-strong fixed inset-y-0 left-0 z-40 w-80 p-4 pt-16 outline-none lg:hidden"
             initial={reduced ? false : { x: '-100%' }}
             animate={{ x: 0 }}
             exit={reduced ? undefined : { x: '-100%' }}

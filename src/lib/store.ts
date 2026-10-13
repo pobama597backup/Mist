@@ -13,6 +13,9 @@ import type {
 } from './types'
 
 export type MistView = 'consciousness' | 'chat' | 'self' | 'settings'
+// v-redesign: the full 16-tab surface, reconciled with the drawer's local
+// superset (the 10-e2 "NOTE FOR THE LEAD" debt is closed — drawer.tsx now
+// uses this union directly).
 export type DrawerTab =
   | 'system'
   | 'tools'
@@ -23,6 +26,13 @@ export type DrawerTab =
   | 'evolve'
   | 'automations'
   | 'vault'
+  | 'control'
+  | 'subagents'
+  | 'upstream'
+  | 'traces'
+  | 'efficiency'
+  | 'knowledge'
+  | 'operators'
 
 /** Voice pipeline preference: where hearing (STT) + speaking (TTS) run. */
 export type VoiceMode = 'auto' | 'local' | 'cloud' | 'browser'
@@ -67,7 +77,6 @@ interface NeuralStateSlice {
   connected: boolean
   memoryActive: boolean
   voiceReady: boolean
-  audioEnergy: number
   emotion: string
 }
 
@@ -138,7 +147,6 @@ interface MistStore {
   // neural mirror (driven by socket events)
   neural: NeuralStateSlice
   setNeuralState: (s: ConsciousnessState) => void
-  setAudioEnergy: (e: number) => void
   setConnected: (b: boolean) => void
   applyServerMessage: (m: NeuralServerMessage) => void
   // backend health
@@ -368,13 +376,10 @@ export const useMistStore = create<MistStore>((set, get) => ({
     connected: false,
     memoryActive: true,
     voiceReady: true,
-    audioEnergy: 0,
     emotion: 'calm',
   },
   setNeuralState: (s) =>
     set((st) => ({ neural: { ...st.neural, state: s } })),
-  setAudioEnergy: (e) =>
-    set((st) => ({ neural: { ...st.neural, audioEnergy: Math.max(0, Math.min(1, e)) } })),
   setConnected: (b) =>
     set((st) => ({ neural: { ...st.neural, connected: b } })),
   applyServerMessage: (m) => {

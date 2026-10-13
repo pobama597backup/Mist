@@ -35,7 +35,9 @@ const CACHE_MS = 60_000
 
 async function hermesAction(action: string, args: Record<string, unknown> = {}): Promise<unknown> {
   const { bridgeExec } = await import('@/lib/services/bridge-service')
-  return bridgeExec(action, args)
+  // Phase 2-b: owner-initiated delegation — arbitrated as owner_chat (her
+  // heavy asks like hermes_ask land in the approval bell, not a dead 403).
+  return bridgeExec(action, args, { origin: 'owner_chat' })
 }
 
 async function cached(action: string, maxAgeMs = CACHE_MS): Promise<{ data: unknown; cached: boolean }> {

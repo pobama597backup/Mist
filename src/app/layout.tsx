@@ -1,7 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
-import { Toaster } from "@/components/ui/toaster";
 import { Toaster as SonnerToaster } from "@/components/ui/sonner";
 
 const inter = Inter({
@@ -40,16 +39,16 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning className="dark" style={{
-      '--glass-opacity': '20%',
-      '--blur-intensity': '40px',
-      '--accent-color': '#8b5cf6'
-    } as React.CSSProperties}>
+    <html lang="en" suppressHydrationWarning className="dark">
+      {/* v-redesign: the old inline --glass-opacity/--blur-intensity/--accent-color
+          defaults were BOTH wrongly named (vs the store's writers) and wrongly
+          valued (20% vs 30, 40px vs 16, #8b5cf6 vs #a855f7) — and nothing ever
+          consumed them. The appearance tokens now live in globals.css :root with
+          the true shipped defaults; app-shell mirrors the store prefs onto them. */}
       <body
         className={`${inter.variable} ${jetbrains.variable} antialiased bg-background text-foreground overflow-x-hidden`}
       >
         {children}
-        <Toaster />
         <SonnerToaster position="top-center" offset="4.5rem" richColors theme="dark" />
       </body>
     </html>

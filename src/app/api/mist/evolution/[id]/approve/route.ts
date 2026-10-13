@@ -3,12 +3,17 @@ import { applyProposal } from '@/lib/services/evolution-service'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
-export const maxDuration = 300
+// Phase 2-c: the full apply battery (staged gates + tsc + ESLint + security
+// suite) can legitimately take minutes on this box — 600s ceiling.
+export const maxDuration = 600
 
 export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await ctx.params
-    const result = await applyProposal(id)
+    // ownerApproved: this route IS the owner-authenticated UI (session-gated
+    // by the perimeter) — the only lane that may apply protected-path
+    // proposals, and exempt from the A3 auto-apply floor (Phase 2-c, A5).
+    const result = await applyProposal(id, { ownerApproved: true })
     if (!result.proposal) return NextResponse.json({ error: 'proposal not found' }, { status: 404 })
     return NextResponse.json({
       ok: result.proposal.status === 'applied',

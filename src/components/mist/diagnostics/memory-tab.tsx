@@ -1,6 +1,8 @@
 'use client'
 
-// MemoryTab — long-term facts, semantic vector search and the processing queue.
+// MemoryTab — long-term facts, lexical impression search (NO embeddings — the
+// "vector" names are historical, the engine is TF-cosine over tokens) and the
+// processing queue.
 
 import { useCallback, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
@@ -12,6 +14,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { mistApi } from '@/lib/mist-api'
 import { cn } from '@/lib/utils'
 import { MonoBadge, SectionLabel, relTime } from './shared'
+import { QuarantineSection } from './quarantine-section'
 import { useInterval } from '@/hooks/use-interval'
 import type { MemoryFact, MemoryQueueItem, MemoryStats, VectorSearchResult } from '@/lib/types'
 
@@ -29,7 +32,7 @@ function distanceBadgeClass(distance: number): string {
 
 function sourceOf(metadata: Record<string, unknown>): string {
   const raw = metadata?.source ?? metadata?.kind ?? metadata?.role
-  return typeof raw === 'string' && raw.length > 0 ? raw : 'vector'
+  return typeof raw === 'string' && raw.length > 0 ? raw : 'lexical'
 }
 
 export function MemoryTab() {
@@ -73,7 +76,10 @@ export function MemoryTab() {
   }, [])
 
   useEffect(() => {
-    refresh()
+    // deferred to a macrotask — refresh() reaches setState from the effect's
+    // sync frame per the lint rule; the useInterval below is untouched
+    const id = window.setTimeout(() => void refresh(), 0)
+    return () => window.clearTimeout(id)
   }, [refresh])
   
   // Set up interval for real-time memory tracking
@@ -131,7 +137,7 @@ export function MemoryTab() {
         setResults([])
         setNoVectors(true)
       } else {
-        toast.error('Vector search unavailable')
+        toast.error('Lexical search unavailable')
       }
     } finally {
       setSearching(false)
@@ -154,7 +160,7 @@ export function MemoryTab() {
         {[
           { label: 'LONG-TERM', value: stats ? `${stats.longterm_count}` : null },
           { label: 'QUEUE', value: stats ? `${stats.queue_count}` : null },
-          { label: 'VECTORS', value: stats ? `${stats.vector_count}` : null },
+          { label: 'IMPRESSIONS', value: stats ? `${stats.vector_count}` : null },
         ].map((s) => (
           <motion.div
             key={s.label}
@@ -198,7 +204,7 @@ export function MemoryTab() {
                       <div 
                         className="w-full bg-purple-400/20 transition-all duration-500" 
                         style={{ height: `${vectorHeight}px` }}
-                        title={`Vectors: ${entry.stats.vector_count}`}
+                        title={`Impressions: ${entry.stats.vector_count}`}
                       />
                     </div>
                   )
@@ -215,7 +221,7 @@ export function MemoryTab() {
                 </span>
                 <span className="flex items-center gap-1">
                   <span className="h-2 w-2 bg-purple-400/20 rounded-sm"></span>
-                  Vectors
+                  Impressions
                 </span>
               </div>
             </div>
@@ -226,6 +232,9 @@ export function MemoryTab() {
           )}
         </div>
       </section>
+
+      {/* ---- quarantine inbox (Phase 2-c · S11) ---- */}
+      <QuarantineSection />
 
       {/* ---- long-term facts ---- */}
       <section aria-label="Long-term facts" className="flex min-w-0 flex-col gap-2">
@@ -298,9 +307,9 @@ export function MemoryTab() {
         </div>
       </section>
 
-      {/* ---- vector search ---- */}
-      <section aria-label="Vector memory search" className="flex min-w-0 flex-col gap-2">
-        <SectionLabel>semantic recall</SectionLabel>
+      {/* ---- lexical impression search (historically "vector" — no embeddings installed) ---- */}
+      <section aria-label="Lexical memory search (embeddings not installed)" className="flex min-w-0 flex-col gap-2">
+        <SectionLabel>lexical recall (embeddings not installed)</SectionLabel>
         <form
           className="flex gap-2"
           onSubmit={(e) => {
@@ -311,8 +320,8 @@ export function MemoryTab() {
           <Input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="search impressions by meaning…"
-            aria-label="Vector search query"
+            placeholder="search impressions by keyword…"
+            aria-label="Lexical memory search query"
             className="h-9 min-w-0 flex-1 border-white/10 bg-white/5 font-mono text-xs text-slate-200 placeholder:text-slate-500"
           />
           <Button
@@ -332,7 +341,7 @@ export function MemoryTab() {
             {results.length === 0 ? (
               <p className="py-2 text-xs text-slate-500">
                 {noVectors
-                  ? 'No vector impressions yet — they accumulate as you converse.'
+                  ? 'No memory impressions yet — they accumulate as you converse.'
                   : 'No matching impressions for that phrase.'}
               </p>
             ) : (

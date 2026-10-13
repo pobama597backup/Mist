@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useMistStore, type BrowserTab } from '@/lib/store'
+import { useTabBoundary } from '@/hooks/use-tab-boundary'
 import { mistApi } from '@/lib/mist-api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -210,6 +211,11 @@ function CockpitTab() {
   const [elements, setElements] = useState<CockpitElement[] | null>(null)
   const imgWrapRef = useRef<HTMLDivElement>(null)
 
+  // Phase 3-b · TabBoundary: the cockpit's screenshot refresh (its poll) is
+  // pointless against a hidden tab — the fetch sleeps until the boundary
+  // reports the tab visible again.
+  const { visible: tabVisible } = useTabBoundary('browser-window')
+
   const refreshShot = useCallback(async () => {
     setBusy(true)
     try {
@@ -234,8 +240,12 @@ function CockpitTab() {
   }, [])
 
   useEffect(() => {
-    void refreshShot()
-  }, [refreshShot])
+    if (!tabVisible) return // TabBoundary: no screenshot traffic while hidden
+    // deferred to a macrotask — refreshShot setStates synchronously (setBusy)
+    // and the react-hooks/set-state-in-effect rule is right about cascades
+    const id = window.setTimeout(() => void refreshShot(), 0)
+    return () => window.clearTimeout(id)
+  }, [refreshShot, tabVisible])
 
   const act = useCallback(
     async (fn: () => Promise<unknown>) => {

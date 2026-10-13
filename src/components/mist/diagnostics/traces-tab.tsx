@@ -4,7 +4,7 @@
 // Every chat turn, cascade call and mission run lands here as a typed trace;
 // rows expand into the full step timeline with honest input/output payloads.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Check,
   ChevronDown,
@@ -330,7 +330,11 @@ export function TracesTab() {
   const [detailCache, setDetailCache] = useState<Record<string, TraceDetail>>({})
   const [detailLoading, setDetailLoading] = useState<Record<string, boolean>>({})
   const [detailErrors, setDetailErrors] = useState<Record<string, string>>({})
-  const agentsSeen = useRef<Set<string>>(new Set())
+  // Union of every agent seen across refreshes. Was a ref READ DURING
+  // RENDER (agentsSeen.current inside useMemo) — refs belong to
+  // callbacks/effects, so the mirror is state now: identical union
+  // semantics, updated in the same batch as the traces themselves.
+  const [agentsSeen, setAgentsSeen] = useState<Set<string>>(new Set())
 
   const refresh = useCallback(
     async (opts?: { silent?: boolean }) => {
@@ -342,7 +346,11 @@ export function TracesTab() {
           limit,
         })
         setTraces(res.traces)
-        for (const t of res.traces) agentsSeen.current.add(t.agent)
+        setAgentsSeen((prev) => {
+          const next = new Set(prev)
+          for (const t of res.traces) next.add(t.agent)
+          return next
+        })
         setError(null)
       } catch (e) {
         setError(e instanceof Error ? e.message : 'trace store unreachable')
@@ -354,29 +362,37 @@ export function TracesTab() {
   )
 
   useEffect(() => {
-    refresh()
+    // deferred to a macrotask — refresh() setStates synchronously (setLoading)
+    const id = window.setTimeout(() => void refresh(), 0)
+    return () => window.clearTimeout(id)
   }, [refresh])
 
   // fetch the detail for the currently expanded trace (cache-first)
   useEffect(() => {
     if (!expandedId || detailCache[expandedId] || detailLoading[expandedId]) return
-    setDetailLoading((m) => ({ ...m, [expandedId]: true }))
-    setDetailErrors((m) => ({ ...m, [expandedId]: '' }))
-    ojApi.traces
-      .detail(expandedId)
-      .then((res) => {
-        setDetailCache((m) => ({ ...m, [expandedId]: res.trace }))
-        setDetailErrors((m) => ({ ...m, [expandedId]: '' }))
-      })
-      .catch((e) => {
-        setDetailErrors((m) => ({ ...m, [expandedId]: e instanceof Error ? e.message : 'failed to load trace detail' }))
-      })
-      .finally(() => {
-        setDetailLoading((m) => ({ ...m, [expandedId]: false }))
-      })
+    // deferred to a macrotask — the loading/error markers setStates
+    // synchronously and the react-hooks/set-state-in-effect rule is right
+    // about cascades
+    const id = window.setTimeout(() => {
+      setDetailLoading((m) => ({ ...m, [expandedId]: true }))
+      setDetailErrors((m) => ({ ...m, [expandedId]: '' }))
+      ojApi.traces
+        .detail(expandedId)
+        .then((res) => {
+          setDetailCache((m) => ({ ...m, [expandedId]: res.trace }))
+          setDetailErrors((m) => ({ ...m, [expandedId]: '' }))
+        })
+        .catch((e) => {
+          setDetailErrors((m) => ({ ...m, [expandedId]: e instanceof Error ? e.message : 'failed to load trace detail' }))
+        })
+        .finally(() => {
+          setDetailLoading((m) => ({ ...m, [expandedId]: false }))
+        })
+    }, 0)
+    return () => window.clearTimeout(id)
   }, [expandedId, detailCache, detailLoading])
 
-  const agentOptions = useMemo(() => Array.from(agentsSeen.current).sort(), [traces])
+  const agentOptions = useMemo(() => Array.from(agentsSeen).sort(), [agentsSeen])
   const filteredEmpty = traces !== null && traces.length === 0 && (agent !== '' || outcome !== '')
 
   return (

@@ -9,9 +9,13 @@ import type { MemoryFact, MemoryQueueItem, MemoryStats } from '@/lib/types'
 
 // ---------- OpenJarvis trust tiers (provenance on every fact) ----------
 
-export type FactTrust = 'auto' | 'trusted' | 'untrusted'
+/** Phase 2-c widening: 'owner' (the owner's own hand — UI or code constants)
+ * and 'derived' (produced by a turn — auto-extraction, tools, or an accepted
+ * quarantine item) join the legacy tiers. 'untrusted' still means blocked
+ * from prompts; everything except 'untrusted' is recallable. */
+export type FactTrust = 'owner' | 'derived' | 'auto' | 'trusted' | 'untrusted'
 
-export const RECALLABLE_TRUST_TIERS: ReadonlySet<string> = new Set(['auto', 'trusted'])
+export const RECALLABLE_TRUST_TIERS: ReadonlySet<string> = new Set(['owner', 'derived', 'auto', 'trusted'])
 
 export interface FactWithTrust extends MemoryFact {
   trust: FactTrust
@@ -20,7 +24,8 @@ export interface FactWithTrust extends MemoryFact {
 
 function toTrustTier(raw: string | null | undefined): FactTrust {
   const t = (raw ?? 'auto').trim().toLowerCase()
-  return t === 'trusted' || t === 'untrusted' ? t : 'auto'
+  if (t === 'owner' || t === 'derived' || t === 'trusted' || t === 'untrusted') return t
+  return 'auto'
 }
 
 /**
@@ -61,12 +66,27 @@ export async function listFactsWithTrust(): Promise<FactWithTrust[]> {
   }))
 }
 
+/** Provenance metadata riding every programmatic fact write (Phase 2-c). */
+export interface FactMeta {
+  source?: string
+  createdByTurn?: string
+}
+
 /** Upsert a fact + best-effort vector index. New facts default to trust=auto. */
-export async function upsertFact(key: string, value: string, trust: FactTrust = 'auto'): Promise<void> {
+export async function upsertFact(
+  key: string,
+  value: string,
+  trust: FactTrust = 'auto',
+  meta: FactMeta = {}
+): Promise<void> {
+  const provenance = {
+    ...(meta.source !== undefined ? { source: meta.source } : {}),
+    ...(meta.createdByTurn !== undefined ? { createdByTurn: meta.createdByTurn } : {}),
+  }
   await db.longtermMemory.upsert({
     where: { key },
-    update: { value, trust },
-    create: { key, value, trust },
+    update: { value, trust, ...provenance },
+    create: { key, value, trust, ...provenance },
   })
   recordActivity('memory', `long-term fact stored: ${key}${trust === 'untrusted' ? ' (quarantined)' : ''}`)
   if (trust === 'untrusted') return // quarantined facts are never vector-indexed into recall

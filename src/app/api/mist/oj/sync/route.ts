@@ -1,9 +1,11 @@
 // GET  /api/mist/oj/sync — full upstream-sync status + port-map summary
 //                          (+ additive mark_lv field — the Mark-LV anti-rust watch, mlv-rust-3)
 //                          (+ additive teacher_notices — Clare's notes + pending summary, w3-notify)
+//                          (+ additive watchers — the Phase 4-b · R5 outbound opt-in state)
 // POST /api/mist/oj/sync — { action: 'check', force? } force a sweep now ·
 //                          { action: 'apply', proposal_id, develop? } gated apply ·
 //                          { action: 'configure', interval_min?, auto_patch? } update config ·
+//                          { action: 'watchers_set', enabled } flip the outbound opt-in (Phase 4-b · R5) ·
 //                          { action: 'mark_lv_check', force? } scan the Mark-LV repo now (mlv-rust-3) ·
 //                          { action: 'mark_lv_status' } Mark-LV watch status (mlv-rust-3) ·
 //                          { action: 'notice_decide', id, decision } answer Clare's note: wanted|dismissed (w3-notify) ·
@@ -23,6 +25,7 @@ import {
   configureOjSync,
   markLvSyncCheck,
 } from '@/lib/oj/upstream-sync'
+import { outboundWatchersEnabled, setOutboundWatchers } from '@/lib/services/settings-service'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -31,13 +34,25 @@ export async function GET() {
   ensureOjSyncWatch() // any API touch arms the guarded loop
   ensureMarkLvSyncWatch() // mlv-rust-3: same discipline for the Mark-LV watch
   try {
-    const [status, mapping, markLv, teacherNotices] = await Promise.all([
+    const [status, mapping, markLv, teacherNotices, watchers] = await Promise.all([
       getOjSyncStatus(),
       getOjPortMapSummary(),
       getMarkLvSyncStatus(),
       getTeacherNotices(),
+      outboundWatchersEnabled(),
     ])
-    return NextResponse.json({ status, mapping, mark_lv: markLv, teacher_notices: teacherNotices })
+    return NextResponse.json({
+      status,
+      mapping,
+      mark_lv: markLv,
+      teacher_notices: teacherNotices,
+      watchers: {
+        enabled: watchers,
+        note: watchers
+          ? 'outbound watchers ON — watchlist/oj-sync/mark-lv/openclaw/evolution-suggest may leave the machine'
+          : 'watchers paused — outbound off (dormant: zero outbound until you enable it)',
+      },
+    })
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'failed to read oj-sync status' },
@@ -56,6 +71,7 @@ export async function POST(request: Request) {
     develop?: unknown
     interval_min?: unknown
     auto_patch?: unknown
+    enabled?: unknown
     id?: unknown
     decision?: unknown
   }
@@ -81,6 +97,21 @@ export async function POST(request: Request) {
   if (body.action === 'configure') {
     const res = await configureOjSync({ interval_min: body.interval_min, auto_patch: body.auto_patch })
     return NextResponse.json(res, { status: res.ok ? 200 : 400 })
+  }
+
+  // ---- Phase 4-b · R5: the outbound-watchers opt-in (dormant default) ----
+  if (body.action === 'watchers_set') {
+    if (typeof body.enabled !== 'boolean') {
+      return NextResponse.json({ ok: false, message: 'enabled must be a boolean' }, { status: 400 })
+    }
+    const enabled = await setOutboundWatchers(body.enabled)
+    return NextResponse.json({
+      ok: true,
+      enabled,
+      message: enabled
+        ? 'outbound watchers ENABLED — watchlist/oj-sync/mark-lv/openclaw/evolution-suggest may leave the machine'
+        : 'outbound watchers DISABLED — dormant: zero outbound (watchers paused)',
+    })
   }
 
   // ---- mlv-rust-3: the Mark-LV (teacher's assistant) anti-rust watch ----

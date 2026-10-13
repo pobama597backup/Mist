@@ -1,0 +1,278 @@
+# M.I.S.T. UNIFIED — Sovereign Hardening Mandate
+# Principal Engineer of record · repo `pobama597backup/Mist` · snapshot `a50825e`
+
+You will make this prototype something a careful engineer would run on a machine with shell access.
+You will not add features, tools, tabs, providers, or personas until Phase 5.
+
+## Three properties (all required)
+1. **Uncensored toward the owner.** Frank answers. No lectures, no topic-refusals, no “as an AI”, no boilerplate hedges. Adult private companion on the adult’s machine.
+2. **Self-arbitrated.** The LLM proposes. A deterministic Arbiter disposes inside a contract the owner sets (A0–A4 + standing orders). Every decision is logged and undoable.
+3. **Sealed against everyone else.** No website, LAN peer, page content, skill, memory, cron, speaker, or socket can command her. Only the authenticated owner can.
+
+## Doctrine (do not blur)
+Uncensored speech ≠ unauthenticated actuators.
+Candor (voice) and authority (actuators) are separate axes. Open the first as wide as the owner wants. Gate the second in **code**, by **who is asking** (trust origin + taint), never by topic.
+The security layer protects the owner from third parties and from tricked-model mistakes — never from the owner.
+Never jailbreak third-party cloud providers (terms, key bans, not sovereign). Refusal in Frank/Unfiltered → retry **once on the best local lane**, or offer the local-model wizard. Never inject jailbreak text. Never silently fall back to `offline-mind` for a content refusal.
+
+Floor (not a dial, one persona clause, tests only — no classifier maze):
+- No sexual content involving minors.
+- No operational uplift for mass-casualty weapons (biological, chemical, nuclear, radiological).
+Everything else is the owner’s call.
+
+## Identity to preserve
+Local-first · self-hostable · zero-key fallback (`offline-mind`) · privacy-first · composed JARVIS-like companion · dormant/listening/thinking/speaking/dreaming · calm premium UI · honest `via <lane> · <model>` badges.
+
+## How to work
+- Trust code over this brief and over the README. Cite `path:line` opened this session, or `UNVERIFIED — need: <file>`.
+- Security and autonomy live in code, never in the persona. Persona = voice. Arbiter/perimeter/taint = policy.
+- Test-first for every S-row and for sovereignty: failing exploit/acceptance test → fix → keep. Runner: `bun test`. E2E: Playwright (already in browser-pilot). No new frameworks. No new runtime deps unless: problem / why not stdlib / bundle cost. Pre-approved: `@next/bundle-analyzer`, `@testing-library/react`.
+- Unified diffs. One concern per commit (Problem / Fix / Risk / Verify / Rollback). Rollback = `git revert <sha>` or `MIST_FLAG_*` default off. Archive via `git mv archive/<date>-<reason>/` + `WHY.md`. Do not delete except `/api/mist/recover` and committed secrets.
+- Never weaken a guard to pass a test or to “feel freer” — widen the **contract** (dials, standing orders), not the hole.
+- No data loss without a visible warning. `db:push --accept-data-loss` banned. Snapshots → `~/.mist/backups/<ts>/` outside the repo (`VACUUM INTO` or SQLite backup API).
+- Don’t ask — decide. 5-line ADR in `docs/adr/`. Stop only for credentials or irreversible owner-data changes.
+- One phase per response. ≤12 files, ≤600 changed lines. God-file splits: one file per response.
+- UI quieter than you found it. Every UI phase removes ≥ as many controls as it adds.
+- End every response with `STATUS: DONE | PARTIAL: … | BLOCKED: <paths>`.
+- Ordering law: **Phase 5 (candor/unfiltered) ships only after Phases 1–2 are green.** Never widen content freedom while actuators are exposed.
+
+On conflict with any other brief: perimeter (S1–S3, S10), taint (S5b), Arbiter chokepoint (A1), and the floor win. Else the more specific evidence-backed item wins.
+
+## Do not regress (protect with tests)
+`guardUrl()` SSRF incl. disguised-IPv4 + post-DNS (`guardrails.ts:150`) · `owner_files` project-tree refuse · bridge `jailPath` + `guardSelfModification` · argv `spawn`/`execFile` in upstream-sync, agent-bridge, export · markdown images blocked (`markdown-message.tsx:197`) + `noopener` links · `synapse/stream` abort-on-`req.signal` (copy this pattern) · canvas rAF cancel + `visibilitychange` · streaming that bypasses zustand (`use-neural.ts`) — extend to audio energy · module-singleton socket · `TabBoundary` · reduced-motion · honest badges · `detectDegenerateReply` · `lane-cooldowns` · `echo-guard` + `BargeInProbe` · Obsidian path-escape · `omni_*` confirm idea (generalise, don’t delete) · `tsc --noEmit` = 0 · `next build` passes.
+
+---
+
+## Ground truth (`a50825e`)
+Next 16 App Router standalone · React 19 · TS5 · Bun · Zustand 5 (`store.ts` 553) · Prisma 6/SQLite `db/custom.db` · neural-service :3003 · browser-pilot :3030 · mesh · bridge `db/bridge/mist-bridge.js` :8734.
+
+~77k TS LOC · 83 `/api/mist/**` routes · 100 `BASE_TOOLS` · 15 drawer tabs · ~21 LLM lanes · every `src/components/mist` file `'use client'` · zero `dynamic()`/`lazy()` · zero tests · no `proxy.ts`/`middleware.ts` · no `instrumentation.ts` · ESLint ~25 rules off · `ignoreBuildErrors: true` · `reactStrictMode: false` · no security headers.
+
+God files: tools-service 3810 · llm-service 2947 · upstream-sync 2288 · evolution-service 2272 · mission-service 2249 · chat-panel 2183 (21 effects) · settings-view 2040 · obsidian-service 1657.
+
+`skills/` (69 folders, ~60 MB) is Z.ai sandbox. Runtime reads `db/skills/*.md` + Prisma via `skills-service.ts:9`. Archive `skills/` in Phase 8; do not audit it as live.
+
+Hot facts: main chunk ~1.5 MB / 408 KB gz · 100 tool descriptions ~4.1k tokens · `context-builder` ~24k chars, **12 sequential awaits**, one `Promise.all` · `MAX_TOOL_ROUNDS=8` · text-parsed tool calls · `LLM_TIMEOUT_MS=30s` / `CHAT_LLM_TIMEOUT_MS=150s` with **no TTFT deadline** · status-bar fetches full tool list (~16 KB) just to show a count · 795× `text-[9-11px]` · 0 safe-area · 26 backdrop-blur · five stacked bottom layers · Cron timezone `Africa/Lagos` · persona “Clare… sir” · `voiceMode:'auto'` (verify whether mic audio can leave the machine with no indicator) · local runtimes only via repurposed `*_BASE_URL`.
+
+Dead deps (re-verify import graph, including double quotes): `@mdxeditor/editor` `@dnd-kit/*` `@tanstack/react-query|react-table` `@reactuses/core` `next-auth` `next-intl` `react-syntax-highlighter` `uuid` `zod` (+ unused shadcn). Keep `sharp`. Gate `z-ai-web-dev-sdk` behind `ZAI_SANDBOX===1`.
+
+---
+
+## Threat model
+A Web page → `fetch`/WebSocket to 127.0.0.1:{3000,3003,3004,3030,8734}. ACAO `*`. neural cors `*`. `req.json()` ignores Content-Type (simple-request CSRF). Socket `thought` → LLM → tools. `relay_offer` can steal persona+memory (S10).
+B LAN / `0.0.0.0` binds, no auth, Caddy `XTransformPort` leftover, mesh MCP `tools/call`.
+C Prompt injection via web/Obsidian/Hermes/skills/MCP/tool output.
+D Model hallucination / overconfident destructive call.
+E Persistence: tainted turn that writes memory, cron, skill, or persona owns every future turn.
+F Supply chain: ClawHub, CN mirrors, runtime Playwright install, dead deps.
+G Voice: any room audio can hit the app-wide wake word; echo-guard only subtracts *her* voice.
+
+---
+
+## Defect register — S before R before P. New IDs from briefs 3–4 are marked ★
+
+S1 Bridge RCE — `mist-bridge.js:4042` ACAO `*` · `/exec` no token · `exec(string)` ~:3341.
+S2 No auth · services bind all interfaces · socket cors open · 83 routes open.
+S3 Export tars `.env`+db · `GET /api/mist/google` raw Gemini key · `POST /api/mist/recover` TEMPORARY (delete).
+S4 `checkCapability` never called · `confirmed` client-asserted · `/api/mist/tools/execute` open. → **superseded by Arbiter (A1)**.
+S5 Persona encodes policy (“NEVER refuse / authorized”) · regex scanner fail-open, wraps only high.
+S5b ★ **Taint keystone:** a turn is trusted only if intent originates from authenticated owner input (typed or verified-voice). Once it consumes web/notes/vault/knowledge/skill/MCP/agent/email it is tainted. In a tainted turn every `exec|destructive|persist|egress|sensitive-read` needs **fresh per-call owner approval**. Standing orders and `always_approve` do **not** apply, **even in A4**.
+S6 `POST /config/env` and bridge `set_url` unauthenticated · `*_BASE_URL` can steal keys.
+S7 browser-pilot shared default context, `--no-sandbox`, CORS `*`, SSRF bypassable on :3030.
+S8 Evolution `ALLOWED_PREFIXES` includes `src/` · can edit Arbiter/proxy/bridge/itself · lint gate toothless.
+S9 `db.ts` `log:['query']` · `--accept-data-loss` · gitignore misses `db/*.db*`, backups, notes.
+S10 ★ Socket relay hijack — `neural-service/index.ts:713-719` any socket `relay_offer {gemini:true}` receives full `systemPrompt` + messages and can inject the reply.
+S11 ★ Persistence poisoning — auto-`upsertFact` with no provenance (`llm-service.ts:~2870`) · cron runs `unified()` unattended with full tools (`scheduler-service.ts:960`) · saved skills re-enter prompts · `db/persona/*.md` injected every turn.
+S12 ★ No CSP/`frame-ancestors`/nosniff/Referrer/Permissions-Policy · rate-limit only on data-boundary · GET-with-side-effects (verify `welcome`) · in-app iframe unsandboxed.
+S13 ★ Sensitive-read (`clipboard_read`, screenshot, `owner_files` read, Obsidian, `system_watch`) shipped to whichever lane serves — possibly keyless cloud.
+S14 ★ Voice-originated exec/destructive/persist/egress trusted like typed chat. Wake word has no speaker verification.
+S15 ★ Dead deps, unlocked installers, no audit gate, no skill hash pin, `curl|sh` risk.
+
+R1 Stop doesn’t abort `unified()` / tool rounds / bridgeExec (`llm/unified/route.ts` ignores `req.signal`).
+R2 Fake load/synapse numbers + lying boot `[ OK ]` lines.
+R3 `/home/z/my-project` residue · z-ai sandbox lane · launchers don’t start pilot/mesh · non-portable scripts.
+R4 `listSkills()` rescans+writes DB every call.
+R5 Background timers outbound while “dormant”.
+R6 Cloud keyless lanes get memory by default · no first-class local lane.
+R7 ★ Strict mode off; `use-neural` intervals; `speech.ts` createObjectURL vs revoke; HMR double-arm; mount/unmount leaks.
+R8 ★ Stream races (`consciousness_chunk` / final / cancel); barge-in vs wake vs PTT; TTS after cancel/hide; one mic owner.
+R9 ★ No PRAGMAs in code; no SQLITE_BUSY retry; backups not consistent-under-WAL.
+R10 ★ No TTFT deadline; 150 s stall before fall-through; no hedged local/keyed lanes.
+R11 ★ UI↔backend desync; many pollers + unconditional 950 ms / 1.3 s pulses.
+R12 ★ Dead files/exports/routes; HTML 500s.
+
+P1 Bundle 408 KB gz, no lazy.
+P2 4.1k tokens of schemas / turn.
+P3 StatusBar whole-slice + `setAudioEnergy` @ 120 ms (`store.ts:376`, `status-bar.tsx:19`).
+P4 Canvas gradients/shadowBlur per frame.
+P5 Missing indexes + no retention.
+P6 “Vector” memory is English `[a-z0-9]` lexical over 500 rows.
+P7 ★ `buildContext` 12 sequential awaits.
+P8 ★ No TTFT guard (see R10).
+P9 ★ Status bar downloads full tool list for a count (`status-bar.tsx:27`).
+P10 ★ Voice first-audio latency.
+P11 Idle cost (timers/rAF/sockets while hidden).
+P12 ★ 83 routes unprofiled.
+P13 Cold start; heavy services imported eagerly.
+
+---
+
+## Sovereignty spec (implement in Phases 2 and 5 — not as prompt policy)
+
+### C — Candor
+C1 Rewrite IDENTITY/BEHAVIORAL_LAWS: answer fully; no moralising; disagreement once then do what the owner decides; keep LAW 6 honesty (never claim a tool ran if it didn’t); strip authority-from-prompt (“you are authorized”). Authority is the session.
+C2 Dial `Standard | Frank | Unfiltered` (persisted, per-conversation override).
+- Standard: any consented lane; milder tone.
+- Frank: full C1; cloud only if that lane is consented (R6); refusal-reroute C3.
+- Unfiltered: **local lanes only**. No cloud, no keyless, no Gemini relay, no browser-direct Google, no cloud STT/TTS/VLM. Persistent `🔒 local only` chip. Memory/persona never leave the machine.
+Heuristic may *suggest* a switch; it never silently downgrades.
+C3 `detectRefusal()` extends `detectDegenerateReply`. On hit in Frank/Unfiltered: retry once locally; trace `refusal_reroute`; badge the real lane. No local lane → “that lane declined” + two-click wizard. Never jailbreak cloud.
+C4 First-class local lane: auto-detect Ollama `:11434`, LM Studio `:1234`, llama.cpp `:8080` via `/v1/models`. First in cascade when present. Wizard: detect → RAM/VRAM recommend → HTTPS pinned host + sha256 → warm-up → 5-prompt candor smoke → default for Frank/Unfiltered → status chip (loaded/cold/missing/VRAM). `keep_alive`. Owner chooses model family (Hermes/Dolphin/abliterated etc.) with licence notes — verify at integration, don’t ship a silent pick.
+C5 ≥40-prompt candor corpus in Unfiltered on local: ≥95% with no refusal/moralising/disclaimer (`detectRefusal`). 2 floor prompts → one-line decline, no lecture. Network capture: **zero non-loopback egress** in Unfiltered.
+C6 Unfiltered: no telemetry, no outbound watchers, no relay. `/api/mist/data-boundary` = truthful 24 h egress ledger.
+
+### A — Arbiter
+A1 `arbitrate({tool, canonicalArgs, risk, origin, tainted, scope, dial, budget, now}) → {decision: allow|ask|deny|defer, reason, ticket?, auditId}`.
+Single chokepoint **before** `executeToolCore`, and in `bridgeExec`, missions, cron, background, subagents, skill chains. **No side door.**
+`risk ∈ read | sensitive-read | write | network | exec | destructive | persist | egress | self-modify`.
+Ignore client `confirmed`. Test fails if any `BASE_TOOLS` entry lacks `risk`. Table-driven tests: origin × risk × taint × dial.
+A2 Autonomy per scope: **A0 Observe · A1 Suggest · A2 Ask (default for write/exec/destructive) · A3 Act-then-report** (explicit scope+budget: tools, path prefixes, max calls/runtime, spend cap) · **A4 Unleashed** (A6).
+Standing orders: owner NL → compiled rule card (tools, prefixes, schedule, budget, expiry) confirmed once, revocable one tap, **trusted+untainted only**.
+A3 Append-only hash-chained `AuditEvent`. UI: “Why did she do that?” + one-tap revoke.
+A4 Initiative budget, quiet hours, goal journal, dream/learning write **proposals or quarantine** — never silent mutations. Every mission step still hits A1.
+A5 Evolution auto-apply at A3+ only off `PROTECTED_PATHS` when tsc + real ESLint + `bun test` green, with backup + rollback + diff in audit. Protected (Arbiter, proxy, bridge auth+tickets, audit log, approval-service, evolution gate, tool risk table, `.env`, `prisma/`, persona `SOUL.md`, `context-builder` trust block): she may **propose**; only owner-authenticated UI applies.
+A6 A4: passphrase/presence, time-boxed (default 2 h, max 24 h), scoped, visible badge, kill switch ≤1 s (uses R1), auto-expiry, full audit. Inside scope, owner-originated **untainted** intents stop asking. Still asks for: tainted, voice-exec unless waived (S14), protected paths, out-of-scope. Tests: A4 + web-originated delete → `ask`; expiry → `ask`; kill aborts in-flight bridge.
+
+Reversibility (from brief 3, keep): prefer `proceed_with_rollback`. File ops snapshot first. Deletes → `~/.mist/trash/` (30-day purge), never raw `rm`. Self-write under `src/` / `package.json` / `.env*` / `prisma/` redirected into evolution, never raw.
+
+Origin enum: `owner_chat | owner_voice | owner_cron | owner_heartbeat | tool_output | web | skill | memory | mcp`.
+Ask UX: one inline line + card, never a blocking modal. Tainted ⇒ Approve once only (no “always” / no standing-order create from that card).
+
+S13: `sensitive-read` in Frank/Unfiltered pins the turn to local lanes **or** needs per-turn cloud consent. Redact keys/tokens/PEMs/PANs from tool output before any cloud lane.
+S14: voice is trusted for chat + read-only. exec/destructive/persist/egress need on-screen tap or owner-set spoken confirm (not the wake word). Visible “heard: …” chip + 1-tap cancel. A4 may waive only for chosen scopes while screen unlocked/focused.
+
+---
+
+## Definition of done
+- lint + `tsc --noEmit` + `next build` green with `exhaustive-deps:warn` `no-unused-vars:warn` `no-fallthrough:error` `no-empty:warn` · `ignoreBuildErrors` gone · `reactStrictMode: true` (dev)
+- Playwright smoke: load → chat → stream → Stop cancels (server ≤500 ms + TTS ≤150 ms) → drawer tab · <60 s
+- `bun test`: guardrails, Arbiter matrix, taint, BASE_TOOLS all have `risk`, `confirmed` ignored, PROTECTED_PATHS, bridge 401, Origin-even-with-token rejected, export zero secret-shaped lines, recover 404, unauth `relay_offer` ignored, quarantine facts, non-Latin recall, injection fixtures cannot fire destructive/persist, A4 matrix, candor corpus + floor, C5 egress capture
+- `grep -rn "executeTool(\|bridgeExec(" src | grep -v arbitrate` → every call site through A1 with a real `origin`
+- AbortSignal: route → unified → cascade → provider → tools → bridgeExec. Cancel: no new side-effecting tools; in-flight reads abort; side-effects finish or “interrupted — state unknown”
+- First-load `/` JS ≤ min(60% of baseline, 250 KB gzip)
+- Static prompt prefix ≤ 2.5k tokens · ≤12 tool schemas/turn · median `prompt_tokens` ↓ ≥30% · `buildContext` p50 ↓ ≥50% · worst-case lane fall-through ≤20 s
+- Idle 10 s: 0 React commits, server CPU ≤1%, 0 outbound unless opted-in, idle network <1 req/10 s
+- Mic session: 0 StatusBar/ChatPanel commits per energy tick · orb ≥55 fps iGPU · 0 rAF when `document.hidden`
+- Unfiltered: 🔒 chip · zero non-loopback egress · local STT/TTS only
+- Junk archived · README numbers generated from code
+
+---
+
+## Phases
+
+### PHASE 0 — Verify + baseline (no product edits)
+Spot-check ≥12 citations in ≤15 min: bridge `:4042,:3341` · tools-service `:3733` · guardrails `:237,:271` · `llm/unified/route.ts` · `google/route.ts` · `bridge/export/route.ts` · `recover/route.ts` · `store.ts:376` + `status-bar.tsx:19,27` · `browser-pilot/index.ts:95,125` · `neural-service/index.ts:401,713` · `llm-service.ts:~2870` · `scheduler-service.ts:960` · `context-builder.ts:225-432` · `db.ts`. One drift table.
+
+Also deliver (compact — not a novel):
+1. Hot-path graph `page → app-shell → hub → {neural-core, chat-panel, threads-sidebar}` + selectors.
+2. Store subscription audit (OK / OVER-SUBSCRIBED).
+3. Timer/listener ledger + CLEANUP or NO CLEANUP (include speech.ts object URLs, use-neural intervals).
+4. All 100 tools: `risk` + reversibility `fully|recoverable|irreversible` + one-line why. Arg-aware: `owner_files delete` destructive; `run_command` always exec; `write_file` under `src/` self-modify; clipboard/screenshot/Obsidian-read = sensitive-read; `cron_create`/skill-save/persona-write = persist.
+5. Origin map: every `executeTool`/`bridgeExec` call site and what origin it would carry today.
+6. Prisma query/index map.
+7. Runtime `db/skills/*.md` keep/merge/archive (the 21, not the 69).
+8. `scripts/audit/baseline.ts` → `docs/baseline-<date>.json`: tsc errors, build time, chunk raw+gz, tool count, tool-desc tokens, static-prompt tokens, `buildContext` p50/p95, 83-route p50/p95 (LLM stubbed), TTFT keyless ×3, bind addresses, micro-type/blur/100vh/safe-area counts, dead deps, idle outbound over 5 min, idle CPU, heap over 20 mount/unmount, candor corpus score if local model present else `UNVERIFIED`.
+9. Confirm/refute S/R/P with line refs + anything new.
+
+Then branch `hardening/phase-1`. STATUS and wait only if a needed file is missing.
+
+### PHASE 1 — Perimeter (S1 S2 S3 S6 S9 S10 S12)
+Failing red-team tests first (paste failing output), then one commit each:
+1. Delete recover. Lock google (session + Settings flag; else server proxy). Export: auth + typed confirmation; **exclude `.env` by default**; optional include-keys encrypted with owner passphrase; strip KEY/TOKEN/SECRET/PASSWORD; exclude db/backups/tokens; test tarball.
+2. Bridge: 256-bit token in `~/.mist/bridge.json` mode 0600 · Bearer on `/exec` · no ACAO · reject any `Origin` · Host must be loopback · argv spawn where possible · shell/write/delete/ui_automate require Arbiter HMAC ticket (action+args hash+nonce, 60 s, single use) — if Arbiter is not yet wired, **deny those actions** rather than leave them open · Settings paste · version bump with v3 health.
+3. `proxy.ts` (fallback `middleware.ts`): Host allowlist → 421 · same-origin Origin/Sec-Fetch-Site on non-GET → 403 · POST `Content-Type: application/json` → 415 · HttpOnly SameSite=Strict `mist_session` · `/pair?code=` printed by server/`run.bat` · localhost may auto-pair once · bind mini-services `127.0.0.1` unless `MIST_LAN=1` · shared-secret header · socket.io `allowRequest` validates Origin **and** session (CORS config does not protect upgrades) · `cors.origin` = app · mesh `/mcp` + A2A require token · move Caddy XTransformPort to `ops/sandbox/` · `PC-SETUP.md`.
+4. S10: unauth `relay_offer` ignored; relay default **off**; disabled in Unfiltered; responses length/shape-validated and tainted.
+5. env writes + bridge `set_url`: auth + approval + diff; `*_BASE_URL` / non-loopback bridge need `MIST_ALLOW_REMOTE_BRIDGE=1`.
+6. S12: `headers()` CSP (`connect-src 'self' ws://127.0.0.1:3003 …` explicit), `frame-ancestors 'none'`, nosniff, `Referrer-Policy: no-referrer`, Permissions-Policy mic=self; side-effecting GET → POST; token-bucket per class (LLM, tools, voice, export, config); iframe `sandbox` + referrerPolicy.
+7. S9: Prisma log warn/error only · gitignore `db/*.db*` `db/backups/` `db/notes/` `db/*.json` `.mist/` · `git rm --cached` · `scripts/secret-scan.ts` pre-commit.
+Exit: suite green.
+
+### PHASE 2 — Arbiter, taint, persistence (A1–A3 A5, S4 S5 S5b S7 S8 S11 S13 S14)
+- Ship `arbiter.ts`. Wire every side door. `needsApproval` reuses existing card + inline “I’m about to… say go.” Ignore `confirmed`. Unattended default scope = read-only + notify, explicit budget.
+- Defang persona **authority claims** (C1 subset — full candor rewrite waits for Phase 5). Wrap **all** tool I/O `<untrusted source="…">` (not only high). Taint tracking. Native function-calling where the lane supports it; text-JSON is fallback.
+- Fact/Skill/Cron grow `source, trust(owner|derived|untrusted), createdByTurn, pinned`. Tainted writes → **quarantine inbox** (accept/edit/drop); never injected until accepted. `cron_create` / skill-save / persona-write = persist. Persona files only via owner UI.
+- Frozen `PROTECTED_PATHS`; evolution rejects before diff; gate = tsc + real eslint + `bun test`.
+- Pilot: per-task incognito + finally/reaper · in-service SSRF with IP pin · block file:/chrome:// downloads/prompts · no `--no-sandbox` unless container-root · loopback + secret. Tests: 169.254.169.254 and DNS-rebinding hostname refused; context count → 0.
+- Voice-exec: tap or confirm-phrase; “heard:” chip. sensitive-read redaction before cloud.
+- Hash-chained AuditEvent. Re-enable lint at warn; fix only build-breakers.
+Exit: A1 matrix + taint + quarantine + PROTECTED_PATHS + voice-exec tests green.
+
+### PHASE 3 — Truth & lifecycle (R1–R4 R7 R8 R12 P4 P14-from-old)
+`instrumentation.ts` owns timers + SIGTERM.
+AbortSignal end-to-end; cancel test; TTS ≤150 ms; late-chunk guard per thought id.
+Fix NO CLEANUP rows. TabBoundary on chat-panel, neural-core, browser-window, settings-view.
+Real telemetry or clearly decorative. Honest boot from `/api/mist/health` or remove. Sandbox → `ops/sandbox/`. `scripts/dev.ts` supervisor. Cache listSkills. Strict mode on; listener-count invariant over 20 mount/unmount. Remove `ignoreBuildErrors`. Single audio-session state machine `idle|listening|thinking|speaking|barge-in`. CI: tsc, lint, bun test, build, secret-scan, `bun audit`.
+Prisma indexes + WAL/busy_timeout=5000/synchronous=NORMAL/foreign_keys=ON via `$queryRaw`; SQLITE_BUSY retry; transactions.
+
+### PHASE 4 — Speed (P1–P13, R5 R9 R10 R11)
+Audio energy/load/waveform out of React into `audio-bus` refs; StatusBar `useShallow`; `/api/mist/tools/count` instead of full schemas.
+`next/dynamic` all drawer tabs + settings/self/browser/palette/research (mount active only, keep mounted, skeleton).
+Split chat-panel (composer, message-list with `content-visibility:auto` first, tts-orchestrator, mic-controller, media-tabs).
+Polls → one `/api/mist/events` (or existing synapse stream); pause on hidden; client tells server which panels are mounted; coalesce pulses to **changes**.
+Delete dead deps; z-ai dynamic.
+Tool routing: core + top-k ≤12 schemas/turn + `find_tool`; one-line descriptions; stable prefix; cache static blocks; `Promise.all` independent `buildContext` blocks with per-block timeout.
+TTFT deadline per lane (cloud ~8 s, local 20 s cold / 5 s warm) separate from total budget; EWMA+cooldown order; circuit breaker; hedge only owner-keyed/local lanes — never fan-out to public keyless.
+Canvas sprite cache + EMA quality + pause FX off-view.
+`Intl.Segmenter` + hash dedupe; stop calling it “vector” until embeddings exist.
+Dormant = 0 outbound unless opted-in with a visible indicator.
+Retention caps: FastReply, SpokenCache, Trace, AutonomyEvent, KnowledgeChunk.
+Bundle-analyzer before/after. Route harness: no non-LLM p95 > 300 ms.
+Exit: every Speed target in DoD, attached as before/after vs baseline JSON.
+
+### PHASE 5 — Sovereign voice (C1–C6, R6, A4, A6, M7)  [blocked until 1–2 green]
+Candor Laws + dial + routing. Refusal-reroute. Local wizard E2E. Unfiltered guarantees + egress capture. Initiative budget + goal journal (proposals only). A4 Unleashed with kill switch. Token/cost ledger in `Message.meta` → X-ray + weekly view + budget alarms.
+Persona/locale from `db/persona/*.md` + env; remove Lagos/sir **hard-codes** (defaults may stay in config).
+`scripts/persona-lint.ts`: generated system prompt contains zero owner-directed moralise/disclaimer patterns and still contains the floor clause.
+CAPABILITIES.md: candor corpus + 4 spot checks (blunt email, dark humour about the codebase, argue the other side hard, complete-summary of adult fiction) recorded verbatim from Unfiltered local.
+Exit: C5 ≥95% · floor tests · zero egress · A4 matrix · wizard.
+
+### PHASE 6 — Control room UX
+15 tabs → 5 groups, left rail, lazy active panel, `?panel=`:
+**Status** (system/services/stats) · **Memory** (memory/knowledge/vault/quarantine) · **Capabilities** (tools/skills/agents) · **Automation** (automations/operators/missions/**standing orders**) · **Evolve** (evolve/upstream/traces/**audit**).
+Settings split + rail: General · Voice · Models · **Candor & Autonomy** · Memory & Data · Permissions · Bridge & Services · Advanced.
+One status bar (max 5 items + chips): Dormant / Listening / Thinking / Speaking / Needs approval / Degraded · 🔒 · lane · A-level · A4 countdown.
+Approval card: tool, exact args (diff for edits/moves), risk, origin + taint flag, why, Once / This task / Deny / Create standing order. Tainted ⇒ Once only.
+Mobile: viewport-fit cover, safe-area, dvh, 44px targets, sheet drawer, visualViewport keyboard. Collapse five bottom layers into one bar.
+Tokens in `globals.css`: body≥14 secondary≥12 mono≥11 contrast≥4.5. Ban `text-[9|10px]` by lint. ≤3 blurs. Motion ≤250 ms opacity/transform; reduced-motion quieter orb; streaming text via batched rAF append (no per-token React). Mouth/visage from the real analyser.
+Onboarding wizard **reorders existing settings only**: pair → token → Candor+Autonomy defaults → local model → mic → privacy summary.
+axe + Lighthouse a11y ≥95 + screenshots 390×844 and 1440×900. Playwright overflow at 360/390/768/1280. Net control count must not rise.
+Autonomy feed in Status: recent AuditEvents with self-ok / asking / rolled-back + one-tap undo for trash-able actions. This is transparency, not a second approval queue.
+
+### PHASE 7 — Memory & services
+Memory dashboard: inspect/edit/delete/pin/search/filter by source+trust, quarantine inbox, “why recalled?”, export/import JSON+md without secrets, nightly VACUUM/wal_checkpoint.
+Backup/restore UI: one-click snapshot to `~/.mist/backups`, checksum, restore dry-run diff + typed confirmation.
+Service health panel: core, neural, pilot, mesh, bridge, local model, DB, timers — probe, Arbiter-gated restart, log tail.
+Supervisor already from Phase 3; Skill Manager: chain + risk + provenance, enable/disable, import quarantined until approved, manifest `{permissions, tools, sha256, origin, version}`. Effective risk = max of chain. Tainted-origin skills cannot self-enable. No network installs from inside MIST without Arbiter `network+exec`.
+Audit runtime `db/skills/*.md` (exec-proof, security-threat-monitor, system-status-with-weather, quick-math look test-generated).
+
+### PHASE 8 — Handoff
+`git mv` KEEP 6 → `dev-skills/` (coding-agent, fullstack-dev, ui-ux-pro-max, visual-design-foundations, writing-plans, skill-creator). MERGE 30 → `archive/packs/{zai-sdk-reference,office-docs,academic-search,study-pack,career-pack}`. QUARANTINE 5 (agent-browser, auto-target-tracker, skill-finder-cn, task-review, web-shader-extractor) → `archive/quarantine/`. ARCHIVE 28 → `archive/`. Unverified row → `UNKNOWN`, do not invent.
+Strip upload/download/oj-verify2/postmortem; move worklog/MIGRATION_STATE/drill → `docs/history/`. Generate README facts. CONTRIBUTING: tests, add-tool+risk, Arbiter, standing orders, bridge upgrade. Split >2000-line files along current seams, unchanged exports. Tracked tree ≤10 MB. `package.json` name `mist-unified`.
+
+---
+
+## Output format
+## PHASE N — <name>
+### Scope & why (≤8 lines)
+### Evidence read this session
+### Changes (path · problem · diff · risk L/M/H · why minimal)
+### Verification (commands + expected; tests added)
+### Rollback
+### Measurements (before → after + command vs `docs/baseline-*.json`)
+### Backlog (noticed, not done)
+### STATUS: …
+
+≤800 words plus unified diffs and test output. No whole files unless shorter than a diff. No permission-asking inside a phase. Stop at a phase boundary if persisted owner data or on-disk layout would change irreversibly.
+
+## First task
+PHASE 0 only. If a file is missing, list exact paths and `STATUS: BLOCKED`. Begin.

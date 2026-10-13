@@ -1,9 +1,12 @@
 import { NextRequest } from 'next/server'
+import { timingSafeEqual } from 'node:crypto'
 import { unified } from '@/lib/services/llm-service'
 import type { ActivityEvent } from '@/lib/services/llm-service'
 import { tryFastPath, classifyMessage, fastReplyKey } from '@/lib/services/fast-path'
 import type { UnifiedLlmRequest, UnifiedLlmResponse } from '@/lib/types'
 import { db } from '@/lib/db'
+import { checkRateLimit, rateLimitResponse } from '@/lib/perimeter/rate-limit'
+import { getMistSecrets, SERVICE_HEADER } from '@/lib/perimeter/shared'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -46,7 +49,31 @@ function fastEnvelope(req: UnifiedLlmRequest, text: string, kind: 'smalltalk' | 
   }
 }
 
+/** Phase 2-b Arbiter origin: a request carrying the intra-machine service
+ *  secret (the neural relay — her voice path) is arbitrated as owner_voice;
+ *  every other caller is owner_chat. Timing-safe, same as the perimeter. */
+function arbiterOriginFor(req: NextRequest): 'owner_voice' | 'owner_chat' {
+  const header = req.headers.get(SERVICE_HEADER)
+  if (!header) return 'owner_chat'
+  const secret = getMistSecrets().sessionSecret
+  const a = Buffer.from(header)
+  const b = Buffer.from(secret)
+  return a.length === b.length && (() => {
+    try {
+      return timingSafeEqual(a, b)
+    } catch {
+      return false
+    }
+  })()
+    ? 'owner_voice'
+    : 'owner_chat'
+}
+
 export async function POST(req: NextRequest) {
+  // Phase 1 · S12: the cascade is the most expensive lane in the app —
+  // 30 req/min per session (MIST_RATE_LIMIT_OFF=1 disables).
+  const rl = checkRateLimit('llm', req)
+  if (!rl.ok) return rateLimitResponse('llm', rl.retryAfter ?? 1)
   try {
     const body = (await req.json().catch(() => null)) as UnifiedLlmRequest | null
     if (!body || typeof body.message !== 'string' || !body.message.trim()) {
@@ -85,9 +112,22 @@ export async function POST(req: NextRequest) {
               // (the client's voice path starts TTS on the first sentence —
               // voice in milliseconds instead of after the full completion)
               const onChunk = (text: string) => send({ type: 'chunk', text, at: Date.now() })
-              const result = await unified(body, onActivity, onChunk)
+              // Phase 3-a · R1: req.signal is the CLIENT's lifeline — aborting
+              // the fetch (or the TCP connection dying: the neural relay's
+              // cancel protocol kills its fetch on 'cancel_thought'/disconnect)
+              // fires it, unified() stops the cascade + tool loop, and in-flight
+              // provider fetches die. Best-effort relay path documented in
+              // mini-services/neural-service/index.ts (its controller is the
+              // signal source, not this server).
+              const result = await unified(
+                { ...body, origin: arbiterOriginFor(req) },
+                onActivity,
+                onChunk,
+                req.signal
+              )
               send({ type: 'result', ...result })
-              await seedFastReplyAfterCascade(body, result)
+              // a cancelled turn's text is not a cache-worthy answer
+              if (!req.signal.aborted) await seedFastReplyAfterCascade(body, result)
             }
           } catch (err) {
             send({
@@ -115,15 +155,21 @@ export async function POST(req: NextRequest) {
       await rememberFastReply(body.message, fast)
       return Response.json(env)
     }
-    const result = await unified({
-      message: body.message,
-      mode: body.mode,
-      history: body.history,
-      extra: body.extra,
-      provider: body.provider,
-      thinking: body.thinking,
-    })
-    await seedFastReplyAfterCascade(body, result)
+    const result = await unified(
+      {
+        message: body.message,
+        mode: body.mode,
+        history: body.history,
+        extra: body.extra,
+        provider: body.provider,
+        thinking: body.thinking,
+        origin: arbiterOriginFor(req),
+      },
+      undefined,
+      undefined,
+      req.signal // Phase 3-a · R1: client disconnect cancels the cascade + tool loop
+    )
+    if (!req.signal.aborted) await seedFastReplyAfterCascade(body, result)
     return Response.json(result)
   } catch (err) {
     return Response.json(

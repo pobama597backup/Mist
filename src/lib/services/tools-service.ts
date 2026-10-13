@@ -21,7 +21,7 @@ import { OMNI_TOOLS, executeOmniTool, probeGateway } from './mcp-service'
 import { KNOWLEDGE_TOOLS } from '../oj/knowledge-tools'
 import { OPS_TOOLS } from '../oj/ops-tools'
 import { SYNC_TOOLS } from '../oj/sync-tools'
-import { skillTools, executeSkillTool } from './skills-service'
+import { skillTools, executeSkillTool, listSkills } from './skills-service'
 import { recordActivity } from './activity-service'
 import {
   pilotAvailable,
@@ -58,6 +58,20 @@ import { getOpenClawStatus, syncOpenClaw, ensureOpenClawWatch } from './openclaw
 import { getHeartbeatStatus, ensureHeartbeatWatch } from './heartbeat-service'
 import { sweepWatchlist, getWatchlistStatus } from './watchlist-service'
 import { tokenize } from './vector-service'
+// Phase 2-b Arbiter wiring — the chokepoint decides every tool call
+import { appendAuditEvent } from '../arbiter/audit'
+import { arbitrate, type ArbitrateResult, type Origin } from '../arbiter/arbiter'
+import { markTainted, isTainted } from '../arbiter/taint'
+import { classifyRisk, type RiskClass } from '../arbiter/risk-table'
+import { runWithArbiterTurn, currentArbiterTurn, type ArbiterTurn } from '../arbiter/turn-context'
+import {
+  approvalFingerprint,
+  askFlow,
+  canonicalizeArgs,
+  extractFilePath,
+  loadStandingOrderCards,
+} from '../arbiter/wiring'
+import { resolveArbiterScope, noteA4AllowedCall } from '../arbiter/unleash'
 import { listAutonomyEvents, autonomyStats } from './autonomy-service'
 import {
   discoverVaults,
@@ -421,13 +435,28 @@ async function bridgeAction(
   const { bridgeExec } = await import('./bridge-service')
   const res = await bridgeExec(action, args)
   if (!res.bridgeConnected) return BRIDGE_OFFLINE_PAYLOAD
+  // Phase 5 · A6/A9: an OWNER ABORT (the A4 kill switch / turn cancel) is a
+  // FAILED tool call, not a "successful" one that happens to carry a sad
+  // payload. success:true would hand the LLM/caller a normal-looking result
+  // it could reason about or retry; the mandate's shape is success:false +
+  // the honest 'interrupted — state unknown' error. Throwing maps through
+  // executeToolCore's catch; bridgeExec-level callers keep the structured
+  // result (the R1 lifecycle pins stay untouched).
+  if (
+    res.ok === false &&
+    typeof res.error === 'string' &&
+    (res.error.startsWith('interrupted — state unknown') || res.error === 'aborted by owner')
+  ) {
+    throw new Error(res.error)
+  }
   return res
 }
 
 // LONG_ACTIONS (the run_in_background allowlist) lives in bg-tasks-service —
 // the single source of truth for what may run in the background.
 
-const BASE_TOOLS: BaseToolDef[] = [
+// Phase 2 · Arbiter seed export — the risk table test pins every entry below.
+export const BASE_TOOLS: BaseToolDef[] = [
   // ===== web =====
   {
     info: {
@@ -692,12 +721,12 @@ const BASE_TOOLS: BaseToolDef[] = [
     },
     exec: async () => getTelemetry(),
   },
-  // ===== system — GitHub mirror (read-only by design, w10) =====
+  // ===== system — GitHub self-management (w8: she updates her own source) =====
   {
     info: {
       name: 'github_status',
       description:
-        "Check the public state of your source mirror on GitHub (pobama597backup/Mist): visibility and the last commits your creator pushed. Read-only by design (w10) — the repository is your creator's; you hold no token and have no way to push.",
+        'Check the state of your own source mirror on GitHub (pobama597backup/Mist): token, repo reachability, last commits, uncommitted local changes.',
       category: 'system',
       implemented: true,
       parameters: [],
@@ -705,6 +734,20 @@ const BASE_TOOLS: BaseToolDef[] = [
     exec: async () => {
       const { githubStatus } = await import('./github-service')
       return githubStatus()
+    },
+  },
+  {
+    info: {
+      name: 'github_sync',
+      description:
+        'Snapshot your current source and push an update of YOURSELF to your GitHub repository (pobama597backup/Mist). Use when the creator asks you to update or push yourself to GitHub. Needs a saved token (Settings → GitHub mirror).',
+      category: 'system',
+      implemented: true,
+      parameters: [param('message', 'string', false, 'Commit message (optional, defaults to a timestamped self-update note)')],
+    },
+    exec: async (args) => {
+      const { githubSync } = await import('./github-service')
+      return githubSync(args.message)
     },
   },
   {
@@ -2884,7 +2927,21 @@ const BASE_TOOLS: BaseToolDef[] = [
           bytes: Buffer.byteLength(content),
           lines: linesCount,
           status: 'applied',
-          lint: 'real-tree type-check clean',
+          lint: 'real-tree battery green (tsc + eslint + security tests)',
+          message: res.message,
+        }
+      }
+      if (res.proposal?.status === 'pending') {
+        // Phase 2-c: proposal-only (protected path or below A3) — honest
+        // "proposed, not applied": the write did NOT happen; it waits for the
+        // owner. Same honesty the mandate demands of every self-modify lane.
+        if (mode === 'commit') drafts.delete(rel)
+        return {
+          path: rel,
+          bytes: Buffer.byteLength(content),
+          lines: linesCount,
+          status: 'proposed',
+          proposal_id: row.id,
           message: res.message,
         }
       }
@@ -3076,8 +3133,8 @@ const BASE_TOOLS: BaseToolDef[] = [
         browser_pilot_online: await pilotAvailable().catch(() => false),
         external_agents: agents.map((a) => ({ id: a.id, label: a.label, installed: a.installed })),
         guidance:
-          'If matching_tools cover the intent, use them. If not, NEVER refuse flatly — present the closest ' +
-          'alternatives you CAN do and ask the user which path to take (capability_request).',
+          'If matching_tools cover the intent, use them. If not, be straight about it — present the closest ' +
+          'alternatives you CAN do and ask which path to take (capability_request).',
       }
     },
   },
@@ -3142,7 +3199,11 @@ const BASE_TOOLS: BaseToolDef[] = [
       }
       const res = await createCronJob(
         { ...parsed.spec, name, prompt, delivery: args.delivery === 'silent' ? 'silent' : 'alert' },
-        'user'
+        'user',
+        // Phase 2-c: tool-path write — the Arbiter arbitrated this call, so
+        // provenance only (derived + the executing turn). No auto flag: a
+        // tainted tool call already ASKED, the owner approved the exact args.
+        { turnId: currentArbiterTurn()?.turnId ?? null, source: 'tool:cron_create', trust: 'derived' }
       )
       if (!res.ok) return { created: false, error: res.error }
       return {
@@ -3548,6 +3609,17 @@ export async function listTools(): Promise<ToolInfo[]> {
   ]
 }
 
+/** Phase 3-b · P9: cheap counts for surfaces that only need numbers (the
+ *  status bar). Counts EXACTLY what listTools() counts (base + omniroute +
+ *  learned skills) with NO ToolInfo serialization and NO gateway/pilot
+ *  network probes — the base registry is static and the skill list rides the
+ *  5-minute list cache (Phase 3-a · R4). Warm calls are sub-millisecond. */
+export async function countTools(): Promise<{ count: number; omni: number; skills: number }> {
+  const skills = await listSkills().catch(() => [] as Awaited<ReturnType<typeof listSkills>>)
+  const omni = OMNI_TOOLS.length
+  return { count: BASE_TOOLS.length + omni + skills.length, omni, skills: skills.length }
+}
+
 /** Look up a single tool (base, omniroute, or skill). */
 export async function findTool(name: string): Promise<ToolInfo | null> {
   const base = BASE_MAP.get(name)
@@ -3565,6 +3637,169 @@ export async function findTool(name: string): Promise<ToolInfo | null> {
 
 const SKILL_SUGGEST_CATEGORIES = new Set(['web', 'file', 'system', 'compute', 'utility'])
 
+/** Per-call Arbiter context — who asked, which turn, and the one-time
+ *  approval reference from a just-approved Approval row. */
+export interface ToolExecOpts {
+  origin?: Origin
+  turnId?: string
+  /** false → ask verdicts become owner-review queues (unattended callers) */
+  interactive?: boolean
+  /** an approved Approval id — verified (fingerprint + 10min window) before
+   *  it may soften the Arbiter's ask; consumed on execution */
+  approvalRef?: string
+  /** wiring-side taint override (else derived from turnId + args) */
+  tainted?: boolean
+  /** Phase 3-a · R1: the owner's AbortSignal for this call. Rides the arbiter
+   *  turn context so the ~19 bridge tools' exec fns never change signature —
+   *  bridgeExec reads it and kills the in-flight /exec fetch on abort. */
+  signal?: AbortSignal
+}
+
+/** Tools whose output is web-sourced — an allowed result taints the turn. */
+const WEB_SOURCED = (name: string, risk: RiskClass): boolean =>
+  risk === 'network' || risk === 'egress' || name.startsWith('browser_') || name.includes('research')
+
+const APPROVAL_REF_TTL_MS = 10 * 60_000
+
+/** Verify a one-time approval reference: status approved, fingerprint equal to
+ *  THIS tool call's shape, decided within 10 minutes. Returns the fingerprint
+ *  to soften the Arbiter's ask, or undefined (which changes nothing). */
+async function verifyApprovalRef(
+  approvalRef: string,
+  tool: string,
+  canonicalArgs: Record<string, unknown>
+): Promise<string | undefined> {
+  try {
+    const row = await db.approval.findUnique({ where: { id: approvalRef } })
+    if (!row || row.actionType !== 'tool_exec' || row.status !== 'approved') return undefined
+    if (row.fingerprint !== approvalFingerprint(tool, canonicalArgs)) return undefined
+    if (!row.decidedAt || Date.now() - row.decidedAt.getTime() > APPROVAL_REF_TTL_MS) return undefined
+    return row.fingerprint
+  } catch {
+    return undefined // a store hiccup must never manufacture consent
+  }
+}
+
+interface ArbiterGateAllow {
+  kind: 'allow'
+  origin: Origin
+  turnId?: string
+  verdict: ArbitrateResult
+  risk: RiskClass
+  tainted: boolean
+  approvalRef?: string
+}
+interface ArbiterGateBlock {
+  kind: 'result'
+  result: ToolExecuteResult
+}
+
+/** THE decision point: classify → taint → standing orders → arbitrate, then
+ *  either hand the wrapper an allow (with its turn context) or a ready-made
+ *  honest result (deny message / ask / defer queue). Never throws. */
+async function arbitrateToolCall(
+  name: string,
+  rawArgs: unknown,
+  opts: ToolExecOpts
+): Promise<ArbiterGateAllow | ArbiterGateBlock> {
+  const canonicalArgs = canonicalizeArgs(rawArgs)
+  const origin: Origin = opts.origin ?? 'owner_chat'
+  const risk = classifyRisk(name, canonicalArgs)
+  const tainted = opts.tainted ?? (opts.turnId ? isTainted(opts.turnId, canonicalArgs) : false)
+  let standingOrders = [] as Awaited<ReturnType<typeof loadStandingOrderCards>>
+  try {
+    standingOrders = await loadStandingOrderCards()
+  } catch {
+    standingOrders = [] // no cards → no pre-consent; the matrix decides
+  }
+  let ownerApprovalFingerprint: string | undefined
+  if (opts.approvalRef) {
+    ownerApprovalFingerprint = await verifyApprovalRef(opts.approvalRef, name, canonicalArgs)
+  }
+  // Phase 5 · A4/A6: the scope resolver — an active unleash session with this
+  // tool in scope + budget remaining yields A4 (with budget + voiceWaived);
+  // anything else falls to the settings-backed A0–A3 dial (default A2). The
+  // lazy expiry check rides every call (timer is the belt, this is the braces).
+  const resolved = await resolveArbiterScope(name, extractFilePath(canonicalArgs))
+  const verdict = arbitrate({
+    tool: name,
+    canonicalArgs,
+    risk,
+    origin,
+    tainted,
+    scope: resolved.scope,
+    standingOrders,
+    filePath: extractFilePath(canonicalArgs),
+    ...(resolved.budget ? { budget: resolved.budget } : {}),
+    ...(resolved.voiceWaived !== undefined ? { voiceWaived: resolved.voiceWaived } : {}),
+    ...(ownerApprovalFingerprint ? { ownerApprovalFingerprint } : {}),
+  })
+  const argsJson = (() => {
+    try {
+      return JSON.stringify(canonicalArgs).slice(0, 2000)
+    } catch {
+      return '{}'
+    }
+  })()
+  if (verdict.decision === 'allow') {
+    // Phase 5 · A4: an allowed call inside an unleash session spends budget
+    if (resolved.a4) noteA4AllowedCall()
+    return { kind: 'allow', origin, turnId: opts.turnId, verdict, risk, tainted, approvalRef: opts.approvalRef }
+  }
+  if (verdict.decision === 'deny') {
+    await appendAuditEvent({
+      tool: name,
+      argsJson,
+      // Phase 7 · chain-max: a skill:* denial records the EFFECTIVE risk the
+      // matrix actually judged (verdict.effectiveRisk), not the flat unknown
+      // default — the audit row must match the decision that was made
+      risk: verdict.effectiveRisk ?? risk,
+      origin,
+      tainted,
+      decision: 'deny',
+      reason: verdict.reason,
+      turnId: opts.turnId ?? null,
+    }).catch(() => undefined)
+    return {
+      kind: 'result',
+      result: {
+        success: false,
+        output: null,
+        error: `denied by Arbiter: ${verdict.reason}`,
+        tool: name,
+        duration_ms: 0,
+      },
+    }
+  }
+  // ask / defer — an unattended origin or non-interactive caller queues for review
+  const deferred = verdict.decision === 'defer' || opts.interactive === false
+  const flow = await askFlow({
+    tool: name,
+    canonicalArgs,
+    risk,
+    origin,
+    turnId: opts.turnId,
+    tainted,
+    interactive: !deferred,
+    verdictReason: verdict.reason,
+  })
+  return {
+    kind: 'result',
+    result: {
+      success: true,
+      output: {
+        status: deferred ? 'queued-owner-review' : 'pending-approval',
+        message: flow.message,
+        title: flow.title,
+        ...(flow.approvalId ? { approvalId: flow.approvalId } : {}),
+      },
+      error: null,
+      tool: name,
+      duration_ms: 0,
+    },
+  }
+}
+
 /**
  * Execute a tool. Never throws — always returns a JSON-safe ToolExecuteResult.
  * Unknown tool → success:false. Stub → success:true with a clear stub payload.
@@ -3574,11 +3809,19 @@ const SKILL_SUGGEST_CATEGORIES = new Set(['web', 'file', 'system', 'compute', 'u
  * (tool_call/tool_result), ambient-trace steps, the SSRF guard for http(s)
  * args, an injection scan on fetched content, and error-taxonomy mapping —
  * all additive, none of it may alter the tool's own behavior.
+ *
+ * Phase 2-b (Sovereign Hardening): the Arbiter gate runs BEFORE the core —
+ * every call is classified, taint-checked, matched against standing orders
+ * and arbitrated with a real origin. `confirmed` is IGNORED for decisions
+ * (mandate A1): a client-asserted flag can never authorize a side effect;
+ * only the Arbiter (scopes, floors, taint, one-time approvals, standing
+ * orders) allows, and every verdict lands in the hash-chained audit log.
  */
 export async function executeTool(
   name: string,
   rawArgs: unknown,
-  confirmed = false
+  confirmed = false, // ignored by design (mandate A1) — call-site compat only
+  opts: ToolExecOpts = {}
 ): Promise<ToolExecuteResult & { available?: boolean; errorCategory?: string }> {
   const startedAt = Date.now()
   const args =
@@ -3646,14 +3889,78 @@ export async function executeTool(
     }
   }
 
-  let result: ToolExecuteResult & { available?: boolean; errorCategory?: string } =
-    await executeToolCore(name, rawArgs, confirmed)
+  // ---- Phase 2-b Arbiter gate: decide BEFORE anything runs. Deny returns the
+  // honest error; ask/defer return an honest NOT-EXECUTED result (the Approval
+  // row is already in the bell). Allow opens an arbiter turn so internal
+  // bridgeExec calls may mint one-time actuator tickets.
+  const gate = await arbitrateToolCall(name, args, opts)
+  let result: ToolExecuteResult & { available?: boolean; errorCategory?: string }
+  let arbiterTicket: string | null = null
+  let fromArbiterGate = false
+  if (gate.kind === 'result') {
+    result = gate.result
+    fromArbiterGate = true
+  } else {
+    const turn: ArbiterTurn = {
+      origin: gate.origin,
+      turnId: gate.turnId ?? `tool:${name}`,
+      arbiterAllowed: true,
+      mintedTickets: [],
+      signal: opts.signal, // Phase 3-a · R1: in-flight bridge calls abort with the owner
+    }
+    // `confirmed` deliberately does NOT ride into the core (mandate A1): the
+    // omni gateway's own write-confirmation is the only consumer, and a
+    // client-asserted flag must never satisfy even that — only the Arbiter
+    // (or the omni MCP session itself, when it exists) can authorize a write.
+    result = await runWithArbiterTurn(turn, () => executeToolCore(name, rawArgs, false))
+    arbiterTicket = turn.mintedTickets.length > 0 ? turn.mintedTickets[turn.mintedTickets.length - 1] : null
+    // every allow verdict lands in the chain — with the ticket that rode the
+    // bridge call and the standing-order ref when one authorized it
+    await appendAuditEvent({
+      tool: name,
+      argsJson: (() => {
+        try {
+          return JSON.stringify(args).slice(0, 2000)
+        } catch {
+          return '{}'
+        }
+      })(),
+      // Phase 7 · chain-max: allowed skill:* calls record the EFFECTIVE risk
+      // (chain-max) the verdict ran on — the flat table default would lie
+      risk: gate.verdict.effectiveRisk ?? gate.risk,
+      origin: gate.origin,
+      tainted: gate.tainted,
+      decision: 'allow',
+      reason: gate.verdict.reason,
+      ticket: arbiterTicket,
+      turnId: gate.turnId ?? null,
+      orderRef: gate.verdict.orderRef ?? null,
+    }).catch(() => undefined)
+    // web-sourced output taints the turn (S5b keystone) — later side-effect
+    // calls replaying any of it need fresh one-time approval
+    if (gate.turnId && result.success && WEB_SOURCED(name, gate.risk)) {
+      try {
+        const text =
+          typeof result.output === 'string' ? result.output : JSON.stringify(result.output ?? null)
+        if (typeof text === 'string' && text.length > 0) markTainted(gate.turnId, text, name)
+      } catch {
+        /* taint marking must never break the tool result */
+      }
+    }
+    // a one-time approval is spent on its single execution attempt
+    if (gate.approvalRef && result.success) {
+      await db.approval
+        .updateMany({ where: { id: gate.approvalRef, status: 'approved' }, data: { status: 'consumed' } })
+        .catch(() => undefined)
+    }
+  }
 
   // ---- error taxonomy: map failures through the spine classification so
   // every error carries an honest one-next-step message + a category.
   // (unknown-tool errors stay VERBATIM — the mission capability-gap detector
-  // pattern-matches on them.)
-  if (!result.success && result.error && !/unknown tool/i.test(result.error)) {
+  // pattern-matches on them; Arbiter denials stay verbatim too — the reason
+  // is the message, re-wrapping it would only obscure it.)
+  if (!result.success && result.error && !/unknown tool/i.test(result.error) && !fromArbiterGate) {
     const cls = classifyError(result.error)
     result = {
       ...result,

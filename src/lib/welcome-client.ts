@@ -90,15 +90,24 @@ export async function briefMeNow(): Promise<boolean> {
   return deliverBriefing(res)
 }
 
-/** The boot check: greet when the server says it is warranted. */
+/** The boot check: the server says whether a greeting is warranted (GET —
+ * state only, never composes); when warranted we POST { action:'greet' }
+ * which re-evaluates the same gate server-side and composes the briefing.
+ * The side-effecting compose lives on POST — a bare GET can't trigger it. */
 export async function welcomeCheck(): Promise<boolean> {
   try {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
     const res = (await fetch(`/api/mist/welcome?tz=${encodeURIComponent(tz)}`).then((r) =>
       r.json()
     )) as WelcomeResponse
-    if (!res.greet || !res.text) return false
-    return await deliverBriefing(res)
+    if (!res.greet) return false
+    const post = (await fetch('/api/mist/welcome', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'greet', tz }),
+    }).then((r) => r.json())) as WelcomeResponse
+    if (!post.greet || !post.text) return false
+    return await deliverBriefing(post)
   } catch {
     return false // a failed greeting must never break the boot
   }

@@ -35,11 +35,14 @@ import { db } from '@/lib/db'
 import type { Mission } from '@prisma/client'
 import { cascadeComplete } from './llm-service'
 import { listTools, executeTool } from './tools-service'
+import type { Origin } from '@/lib/arbiter/arbiter'
 import { recordActivity } from './activity-service'
 import { logAutonomyEvent } from './autonomy-service'
 import { projectRoot } from './telemetry-service'
 import { routeQuery, scoreComplexity } from '@/lib/oj/complexity'
 import { createLoopGuard, type LoopGuard } from '@/lib/oj/loop-guard'
+import { wrapToolOutput, redactBeforeCloud, markCloudConsent } from '@/lib/oj/guardrails'
+import { classifyRisk } from '@/lib/arbiter/risk-table'
 import { estimateTokens, runWithTrace, startTrace } from '@/lib/oj/trace-service'
 
 // ---------------- constants ----------------
@@ -990,13 +993,28 @@ async function trainingRulesBlock(): Promise<string> {
   }
 }
 
-function transcriptBlock(steps: MissionStep[]): string {
+function transcriptBlock(steps: MissionStep[], turnId?: string): string {
   if (steps.length === 0) return '(nothing executed yet — this is your first step)'
   const recent = steps.slice(-PROMPT_STEPS_IN_CONTEXT)
   return recent
     .map(
-      (s) =>
-        `[${s.i}] ${s.tool}(${capStr(s.args, 200).replace(/^\{|\}$/g, '')}) → ${s.ok ? 'OK' : 'FAIL'}: ${capStr(s.summary, CODE_READ_TOOLS.has(s.tool) ? PROMPT_STEP_SUMMARY_CAP_CODE : PROMPT_STEP_SUMMARY_CAP)}`
+      (s) => {
+        // Phase 2-c: every tool result the mission brain reads rides inside a
+        // labeled untrusted block (wrapToolOutput) — all severities, not only
+        // injection-flagged ones. The step SUMMARY carries the tool output.
+        // Phase 2-d · S13: sensitive-read summaries are REDACTED in this
+        // prompt copy (cascadeComplete walks cloud lanes with the same text —
+        // the honest all-lanes floor; the RAW summary stays in the transcript
+        // row for the owner's mission timeline).
+        const summary = redactBeforeCloud(
+          s.tool,
+          classifyRisk(s.tool, s.args ?? {}),
+          capStr(s.summary, CODE_READ_TOOLS.has(s.tool) ? PROMPT_STEP_SUMMARY_CAP_CODE : PROMPT_STEP_SUMMARY_CAP),
+          true,
+        )
+        if (summary.redactions > 0 && turnId) markCloudConsent(turnId)
+        return `[${s.i}] ${s.tool}(${capStr(s.args, 200).replace(/^\{|\}$/g, '')}) → ${s.ok ? 'OK' : 'FAIL'}: ${wrapToolOutput(s.tool, summary.text)}`
+      },
     )
     .join('\n')
 }
@@ -1004,6 +1022,15 @@ function transcriptBlock(steps: MissionStep[]): string {
 async function executeMissionLifecycle(id: string): Promise<void> {
   let row = await db.mission.findUnique({ where: { id } })
   if (!row) return
+
+  // Phase 2-b: the whole run arbitrates under ONE turnId (taint + audit
+  // join, no cross-mission leakage) and the mission's trigger picks the
+  // Arbiter origin — user/chat turns ask live, scheduled turns queue for
+  // owner review, everything autonomous is heartbeat-flavored.
+  const arbiterOrigin: Origin =
+    row.origin === 'user' ? 'owner_chat' : row.origin === 'scheduler' ? 'owner_cron' : 'owner_heartbeat'
+  const arbiterInteractive = row.origin === 'user'
+  const arbiterTurnId = `mission:${id}`
 
   // ---- PLAN phase (skipped when resuming with a plan) ----
   let plan: MissionPlan | null = parsePlan(row.plan)
@@ -1294,7 +1321,7 @@ async function executeMissionLifecycle(id: string): Promise<void> {
         await actorToolCatalog(),
         ``,
         `# EXECUTED SO FAR (transcript)`,
-        transcriptBlock(steps),
+        transcriptBlock(steps, arbiterTurnId),
         ``,
         `# BUDGETS`,
         `Steps: ${stepsUsed}/${current.maxSteps} used. Consecutive failures: ${failures}/${MAX_CONSECUTIVE_FAILURES}. Time window remaining: ~${minutesLeft} min.`,
@@ -1595,7 +1622,11 @@ async function executeMissionLifecycle(id: string): Promise<void> {
       let result: Awaited<ReturnType<typeof executeTool>>
       try {
         result = await Promise.race([
-          executeTool(toolName, toolArgs, false),
+          executeTool(toolName, toolArgs, false, {
+            origin: arbiterOrigin,
+            turnId: arbiterTurnId,
+            interactive: arbiterInteractive,
+          }),
           new Promise<never>((_, reject) =>
             setTimeout(
               () => reject(new Error(`tool timed out after ${TOOL_TIMEOUT_MS / 1000}s — the mission continues; try a different approach or a lighter tool`)),

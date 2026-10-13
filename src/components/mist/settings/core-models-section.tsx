@@ -80,8 +80,12 @@ export function CoreModelsSection({ status, onSaved }: { status: LlmStatus | nul
   // sync from server whenever status refreshes (unless mid-edit)
   useEffect(() => {
     if (!info) return
-    setTextSel(info.selected.text)
-    setVisionSel(info.selected.vision)
+    // deferred to a macrotask — syncing the selections setStates synchronously
+    const id = window.setTimeout(() => {
+      setTextSel(info.selected.text)
+      setVisionSel(info.selected.vision)
+    }, 0)
+    return () => window.clearTimeout(id)
   }, [info])
 
   const dirty = useMemo(

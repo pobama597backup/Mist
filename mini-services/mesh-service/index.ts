@@ -22,12 +22,32 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { lookup } from 'node:dns/promises'
 import { randomUUID } from 'node:crypto'
+import { SERVICE_HEADER, isServiceToken } from '../lib/perimeter'
 
 const PORT = 3004
 const SERVER_NAME = 'mist-mesh'
 const VERSION = '1.0.0'
 // Protocol version pinned by OpenJarvis's MCP server (spec 2025-11-25).
 const PROTOCOL_VERSION = '2025-11-25'
+const LAN = process.env.MIST_LAN === '1'
+const BIND_HOST = LAN ? '0.0.0.0' : '127.0.0.1'
+
+/** Phase 1 · S2/S10: the functional endpoints (POST /mcp + the A2A card)
+ * require the intra-machine credential — `Authorization: Bearer <sessionSecret
+ * from ~/.mist/mist.json>` or the `x-mist-service` header. GET /health stays
+ * open (identity-free liveness probe, same contract as the app's
+ * /api/mist/health). */
+function isAuthorized(req: IncomingMessage): boolean {
+  const svc = req.headers[SERVICE_HEADER]
+  if (typeof svc === 'string' && isServiceToken(svc)) return true
+  const auth = req.headers.authorization
+  const raw = Array.isArray(auth) ? auth[0] : auth
+  if (typeof raw === 'string') {
+    const m = /^Bearer\s+(.+)$/i.exec(raw.trim())
+    if (m && isServiceToken(m[1].trim())) return true
+  }
+  return false
+}
 
 const STARTED_AT = Date.now()
 let requestsServed = 0
@@ -705,14 +725,23 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     console.log(`${new Date().toISOString()} ${method} ${pathname} → ${status} (${Date.now() - started}ms)`)
   }
 
-  // GET / → A2A agent card
+  // GET / → A2A agent card (credential-gated — Phase 1: she is not
+  // discoverable or drivable by anyone who can reach the port)
   if (method === 'GET' && (pathname === '/' || pathname === '')) {
+    if (!isAuthorized(req)) {
+      finish(401, { error: 'mesh credential required: Authorization: Bearer <sessionSecret from ~/.mist/mist.json> or x-mist-service header' })
+      return
+    }
     finish(200, agentCard())
     return
   }
 
   // GET /.well-known/agent-card.json (A2A discovery) — agent.json alias honored
   if (method === 'GET' && (pathname === '/.well-known/agent-card.json' || pathname === '/.well-known/agent.json')) {
+    if (!isAuthorized(req)) {
+      finish(401, { error: 'mesh credential required: Authorization: Bearer <sessionSecret from ~/.mist/mist.json> or x-mist-service header' })
+      return
+    }
     finish(200, agentCard())
     return
   }
@@ -731,8 +760,12 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     return
   }
 
-  // POST /mcp — MCP over HTTP (JSON-RPC 2.0)
+  // POST /mcp — MCP over HTTP (JSON-RPC 2.0), credential-gated
   if (method === 'POST' && pathname === '/mcp') {
+    if (!isAuthorized(req)) {
+      finish(401, { error: 'mesh credential required: Authorization: Bearer <sessionSecret from ~/.mist/mist.json> or x-mist-service header' })
+      return
+    }
     void (async () => {
       try {
         const raw = await readBody(req)
@@ -766,10 +799,13 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   })
 })
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[mist-mesh] MCP server + A2A agent card on :${PORT}`)
+server.listen(PORT, BIND_HOST, () => {
+  console.log(`[mist-mesh] MCP server + A2A agent card on ${BIND_HOST}:${PORT}`)
   console.log(`[mist-mesh] tools: ${TOOLS.map((t) => t.name).join(', ')}`)
   console.log(`[mist-mesh] browser origin reaches this service via /?XTransformPort=${PORT}`)
+  if (LAN) {
+    console.log('[mist-mesh] ⚠ MIST_LAN=1 — listening on ALL interfaces. Only machines holding the session secret can call /mcp; keep the LAN trusted.')
+  }
 })
 
 process.on('SIGTERM', () => {

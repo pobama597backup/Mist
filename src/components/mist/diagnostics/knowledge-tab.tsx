@@ -196,7 +196,9 @@ export function KnowledgeTab() {
   }, [])
 
   useEffect(() => {
-    refreshConnectors()
+    // deferred to a macrotask — refreshConnectors() setStates synchronously (setConnectorsLoading)
+    const id = window.setTimeout(() => void refreshConnectors(), 0)
+    return () => window.clearTimeout(id)
   }, [refreshConnectors])
 
   const runSearch = async (e?: React.FormEvent) => {

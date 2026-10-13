@@ -21,9 +21,9 @@ import { createHash } from 'node:crypto'
 import { db } from '@/lib/db'
 import { recordActivity } from '@/lib/services/activity-service'
 
-export type ApprovalTier = 'auto' | 'standard' | 'destructive'
-export type ApprovalOrigin = 'mist' | 'operator' | 'mission' | 'subagent'
-export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired'
+export type ApprovalTier = 'auto' | 'standard' | 'destructive' | 'low' | 'medium' | 'high'
+export type ApprovalOrigin = 'mist' | 'operator' | 'mission' | 'subagent' | 'arbiter'
+export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'consumed'
 
 /** Pending approvals older than this are lazily expired. */
 const APPROVAL_TTL_MS = 24 * 60 * 60_000
@@ -111,8 +111,12 @@ export interface CreateApprovalInput {
   actionType: string
   title: string
   payload?: Record<string, unknown>
+  /** Phase 2-b: the Arbiter passes its own fingerprint (tool + canonical
+   *  args) so the re-execution verify matches the row it created. Absent →
+   *  the legacy fingerprintOf shape. */
   tier?: ApprovalTier
   origin?: ApprovalOrigin
+  fingerprint?: string
 }
 
 export interface CreateApprovalResult {
@@ -138,14 +142,17 @@ export async function createApproval(input: CreateApprovalInput): Promise<Create
   }
   const payload = input.payload && typeof input.payload === 'object' ? input.payload : {}
   const tier: ApprovalTier =
-    input.tier === 'auto' || input.tier === 'standard' || input.tier === 'destructive'
+    input.tier && ['auto', 'standard', 'destructive', 'low', 'medium', 'high'].includes(input.tier)
       ? input.tier
       : resolveTier(actionType)
   const origin: ApprovalOrigin =
-    input.origin === 'operator' || input.origin === 'mission' || input.origin === 'subagent'
+    input.origin === 'operator' ||
+    input.origin === 'mission' ||
+    input.origin === 'subagent' ||
+    input.origin === 'arbiter'
       ? input.origin
       : 'mist'
-  const fingerprint = fingerprintOf(actionType, payload)
+  const fingerprint = input.fingerprint && input.fingerprint.length > 0 ? input.fingerprint.slice(0, 200) : fingerprintOf(actionType, payload)
   const payloadJson = JSON.stringify(payload).slice(0, 8000)
 
   // remembered consent short-circuits the queue
@@ -253,7 +260,10 @@ export interface DecideResult {
   remembered?: boolean
 }
 
-/** Decide a pending approval; remember writes PermissionMemory for the fingerprint. */
+/** Decide a pending approval; remember writes PermissionMemory for the fingerprint.
+ *  Phase 2-b: an approved tool_exec row is EXECUTED ONCE right here — the
+ *  re-run carries approvalRef so the Arbiter's one-time owner approval
+ *  softens its ask, and the outcome is appended into the row's payload. */
 export async function decide(id: string, input: DecideInput): Promise<DecideResult> {
   if (input.decision !== 'approve' && input.decision !== 'deny') {
     return { ok: false, error: 'decision must be "approve" or "deny"' }
@@ -269,27 +279,106 @@ export async function decide(id: string, input: DecideInput): Promise<DecideResu
       return { ok: false, error: `approval already ${row.status}`, status: row.status as ApprovalStatus }
     }
     const status: ApprovalStatus = input.decision === 'approve' ? 'approved' : 'denied'
-    await db.approval.update({
-      where: { id },
-      data: { status, decidedAt: new Date(), decidedBy: 'creator' },
-    })
+    // Phase 3-a · R9: the decision write + the remember-write are ONE
+    // transaction — a crash between them must never leave the UI saying
+    // "decided" while the PermissionMemory row (the thing that stops her
+    // asking twice) never landed. Same-model-family group, kept minimal.
     let remembered = false
-    if (input.remember) {
-      try {
-        await db.permissionMemory.upsert({
-          where: { fingerprint: row.fingerprint },
-          create: { fingerprint: row.fingerprint, decision: input.remember },
-          update: { decision: input.remember },
-        })
-        remembered = true
-      } catch {
-        remembered = false // memory write is best-effort; the decision still stands
+    await db.$transaction(async (tx) => {
+      await tx.approval.update({
+        where: { id },
+        data: { status, decidedAt: new Date(), decidedBy: 'creator' },
+      })
+      if (input.remember) {
+        try {
+          await tx.permissionMemory.upsert({
+            where: { fingerprint: row.fingerprint },
+            create: { fingerprint: row.fingerprint, decision: input.remember },
+            update: { decision: input.remember },
+          })
+          remembered = true
+        } catch {
+          remembered = false // memory write is best-effort; the decision still stands
+        }
       }
+    })
+    // ---- Phase 2-b: execute an approved tool call exactly once ----
+    if (status === 'approved' && row.actionType === 'tool_exec') {
+      await executeApprovedTool(row)
     }
     recordActivity('approvals', `${status} ${row.actionType}: ${row.title.slice(0, 60)}${remembered ? ` (remembered ${input.remember})` : ''}`)
     return { ok: true, status, remembered }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : 'failed to decide approval' }
+  }
+}
+
+/** One-shot re-execution of an approved tool_exec row. The dynamic import
+ *  keeps this module free of a static spine dependency (parallel build);
+ *  the Arbiter consumes the row (status → 'consumed') after the attempt. */
+async function executeApprovedTool(row: { id: string; payload: string }): Promise<void> {
+  let payload: Record<string, unknown> = {}
+  try {
+    const parsed = JSON.parse(row.payload || '{}') as unknown
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) payload = parsed as Record<string, unknown>
+  } catch {
+    payload = {}
+  }
+  const tool = typeof payload.tool === 'string' ? payload.tool : ''
+  if (!tool) return
+  const args =
+    payload.args && typeof payload.args === 'object' && !Array.isArray(payload.args)
+      ? (payload.args as Record<string, unknown>)
+      : {}
+  const origin = payload.origin === 'owner_voice' ? 'owner_voice' : 'owner_chat'
+  const turnId = typeof payload.turnId === 'string' ? payload.turnId : undefined
+  try {
+    const { executeTool } = await import('@/lib/services/tools-service')
+    const result = await executeTool(tool, args, false, { origin, turnId, interactive: true, approvalRef: row.id })
+    const out = result.output as Record<string, unknown> | null
+    const requeued =
+      result.success === true &&
+      out !== null &&
+      typeof out === 'object' &&
+      (out.status === 'pending-approval' || out.status === 'queued-owner-review')
+    const summary = requeued
+      ? { executed: false, requeued: true, output: out } // the Arbiter asked again (e.g. tainted args) — nothing ran
+      : result.success === true
+        ? { executed: true, ok: true, output: out }
+        : { executed: true, ok: false, error: result.error ?? 'tool reported failure' }
+    await appendExecutionOutcome(row.id, summary)
+  } catch (err) {
+    await appendExecutionOutcome(row.id, {
+      executed: true,
+      ok: false,
+      error: err instanceof Error ? err.message : 're-execution crashed',
+    })
+  }
+}
+
+/** Fold the one-shot execution outcome into the row's payload JSON. Any
+ *  outcome still consumes the approval — single-use means single-ATTEMPT.
+ *  Phase 3-a · R9: read-modify-write of the payload in ONE transaction. */
+async function appendExecutionOutcome(id: string, summary: Record<string, unknown>): Promise<void> {
+  try {
+    await db.$transaction(async (tx) => {
+      const row = await tx.approval.findUnique({ where: { id } })
+      if (!row) return
+      let payload: Record<string, unknown> = {}
+      try {
+        const parsed = JSON.parse(row.payload || '{}') as unknown
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) payload = parsed as Record<string, unknown>
+      } catch {
+        payload = {}
+      }
+      payload.execution = summary
+      await tx.approval.update({
+        where: { id },
+        data: { payload: JSON.stringify(payload).slice(0, 8000), status: 'consumed' },
+      })
+    })
+  } catch {
+    // outcome bookkeeping is best-effort — the decision itself already stands
   }
 }
 

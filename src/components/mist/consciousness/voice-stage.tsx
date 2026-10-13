@@ -15,16 +15,20 @@ import { motion } from 'framer-motion'
 import { ArrowRight, BrainCircuit, CircuitBoard, CloudRain, Mic, MicOff, Moon, PenLine, Radar, ScanFace, Sparkles, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { useMistStore } from '@/lib/store'
+import { useAudioSession } from '@/lib/audio-session'
 import { useNeural } from '@/hooks/use-neural'
 import { useVoiceSession, useWakeWord, micDeniedGuidance } from '@/hooks/use-voice'
 import { mistSpeech, subtitleBus } from '@/lib/speech'
 import { stripEmotionMarkers } from '@/lib/voice-emotion'
 import { mistApi } from '@/lib/mist-api'
 import { createMicRecorder, type MicRecorder } from '@/lib/audio-utils'
+import { publishMicEnergy } from '@/lib/audio-bus'
 import { STATE_COLORS, STATE_LABELS } from '@/lib/mist-constants'
 import type { ConsciousnessFace } from '@/lib/types'
 import { NeuralCore } from './neural-core'
 import { FaceStage } from './face-stage'
+// Phase 2-d · S14: the visible voice-approval chip (heard + 1-tap decide)
+import { VoiceApprovalChip } from './voice-approval-chip'
 // w3-activity — the live activity line while she processes
 import { ActivityLine } from '@/components/mist/shared/activity-line'
 import { cn } from '@/lib/utils'
@@ -92,6 +96,12 @@ export function VoiceStage({ className }: { className?: string }) {
   const { active: voiceActive, phase: voicePhase, localMode: voiceLocalMode } = voice
   const { start: voiceStart, stop: voiceStop, submit: voiceSubmit, finishCapture: voiceFinishCapture } = voice
 
+  // Phase 3-b · audio-session machine: the captions/hints/orb label read the
+  // ONE audio state (use-voice + speech.ts + barge-in publish into it). The
+  // hook's own phase remains the source for session-local detail (interim
+  // text, the terminal 'error' explanation) — the audio truth is the machine.
+  const sessionPhase = useAudioSession((s) => s.phase)
+
   // ---- mirrors for event handlers (refs are never read during render) ----
   const voiceActiveRef = useRef(false)
   useEffect(() => {
@@ -113,9 +123,12 @@ export function VoiceStage({ className }: { className?: string }) {
       holdingRef.current = true
       setHolding(true)
       useMistStore.getState().setNeuralState('listening')
+      // Phase 4-a · P3: the 120ms energy publishes ride the audio bus —
+      // zero React state on the hot path (the orb pulls micEnergy() in its
+      // tick; no store write, no re-render per tick).
       energyIntervalRef.current = window.setInterval(() => {
         const energy = rec.getEnergy()
-        useMistStore.getState().setAudioEnergy(energy)
+        publishMicEnergy(energy)
         sendVoiceEnergy(energy)
       }, 120)
     } catch {
@@ -135,7 +148,7 @@ export function VoiceStage({ className }: { className?: string }) {
     recorderRef.current?.cancel()
     recorderRef.current = null
     const store = useMistStore.getState()
-    store.setAudioEnergy(0)
+    publishMicEnergy(0)
     // the session keeps waiting for the next hold
     if (store.neural.state !== 'listening') store.setNeuralState('listening')
     sendVoiceEnergy(0.05)
@@ -153,7 +166,7 @@ export function VoiceStage({ className }: { className?: string }) {
     recorderRef.current = null
     if (!rec) return
     const wav = await rec.stop()
-    useMistStore.getState().setAudioEnergy(0)
+    publishMicEnergy(0)
     if (!wav) {
       toast("I couldn't hear anything")
       useMistStore.getState().setNeuralState('listening')
@@ -204,7 +217,7 @@ export function VoiceStage({ className }: { className?: string }) {
         voiceStop()
         return
       }
-      if (voiceLocalMode && voicePhase === 'listening') {
+      if (voiceLocalMode && sessionPhase === 'listening') {
         voiceFinishCapture()
         return
       }
@@ -213,7 +226,7 @@ export function VoiceStage({ className }: { className?: string }) {
     } else {
       voiceStart()
     }
-  }, [cancelHold, voiceStart, voiceStop, voiceLocalMode, voicePhase, voiceFinishCapture])
+  }, [cancelHold, voiceStart, voiceStop, voiceLocalMode, sessionPhase, voiceFinishCapture])
 
   const endSessionClick = useCallback(() => {
     if (holdingRef.current) cancelHold()
@@ -299,16 +312,16 @@ export function VoiceStage({ className }: { className?: string }) {
   const reply = voice.lastReply
   const replyTruncated = reply.length > REPLY_CAP
   const replyShown = replyTruncated ? `${reply.slice(0, REPLY_CAP).trimEnd()}…` : reply
-  const localListening = voiceActive && voice.localMode && voicePhase === 'listening'
+  const localListening = voiceActive && voice.localMode && sessionPhase === 'listening'
   const hint = localListening
     ? 'speak, then tap the orb to send'
-    : voiceActive && voicePhase in HINTS
-      ? HINTS[voicePhase as keyof typeof HINTS]
+    : voiceActive && sessionPhase in HINTS
+      ? HINTS[sessionPhase as keyof typeof HINTS]
       : HINTS.idle
   const orbLabel = voiceActive
     ? localListening
       ? 'Done speaking'
-      : voicePhase === 'speaking'
+      : sessionPhase === 'speaking'
         ? 'Stop speaking'
         : 'End session'
     : 'Talk with Mist'
@@ -353,6 +366,10 @@ export function VoiceStage({ className }: { className?: string }) {
 
       {/* ------------------------------------------------ CAPTIONS ---------- */}
       <div className="z-10 w-full shrink-0 px-4 pb-3">
+        {/* Phase 2-d · S14: pending voice ask → visible "heard: …" chip with
+            1-tAP cancel/approve (on-screen-tap path; spoken confirm is wired
+            in use-voice handleUtterance) */}
+        <VoiceApprovalChip lastHeard={voice.lastHeard} />
         <div
           role="status"
           aria-live="polite"
@@ -365,7 +382,7 @@ export function VoiceStage({ className }: { className?: string }) {
           )}
         >
           {/* listening — live interim transcript with a pulsing mic dot */}
-          {voiceActive && voicePhase === 'listening' && (
+          {voiceActive && sessionPhase === 'listening' && (
             <p className="flex items-start gap-2.5 px-2 text-balance text-[15px] leading-relaxed">
               <span
                 aria-hidden
@@ -393,12 +410,12 @@ export function VoiceStage({ className }: { className?: string }) {
               background — the creator may be watching the orb from here.
               w5: once her reply starts STREAMING, the text itself shows here
               too — text first, voice seconds later, never a blank stage. */}
-          {(voicePhase === 'thinking' || (!voiceActive && neuralState === 'processing')) && (
+          {(sessionPhase === 'thinking' || (!voiceActive && neuralState === 'processing')) && (
             <div className="px-2">
               <p className="min-h-6 pt-2">
                 <ActivityLine active className="text-[11px]" />
               </p>
-              {voiceActive && voicePhase === 'thinking' && voice.streamingReply && (
+              {voiceActive && sessionPhase === 'thinking' && voice.streamingReply && (
                 <p className="mist-scroll mt-1 max-h-40 animate-mist-fade-in overflow-y-auto text-balance text-[15px] leading-relaxed text-slate-300/90">
                   {/* w8: markers are for her voice, never for the reader */}
                   {truncate(stripEmotionMarkers(voice.streamingReply), REPLY_CAP)}
@@ -412,7 +429,7 @@ export function VoiceStage({ className }: { className?: string }) {
               still queued wait dim — a slick minimal karaoke-style caption
               that tracks her actual voice. Falls back to the plain reply
               text when the utterance didn't stream (whole-text speak path). */}
-          {voicePhase === 'speaking' && subs.chunks.length > 0 && (
+          {sessionPhase === 'speaking' && subs.chunks.length > 0 && (
             <div
               ref={subsScrollRef}
               className="mist-scroll max-h-44 overflow-y-auto px-2 text-balance text-[15px] leading-relaxed"
@@ -439,7 +456,7 @@ export function VoiceStage({ className }: { className?: string }) {
           )}
 
           {/* speaking (non-streamed utterance) — Mist's reply, fading in */}
-          {voicePhase === 'speaking' && subs.chunks.length === 0 && replyShown && (
+          {sessionPhase === 'speaking' && subs.chunks.length === 0 && replyShown && (
             <div className="px-2">
               <p className="mist-scroll max-h-40 animate-mist-fade-in overflow-y-auto text-balance text-[15px] leading-relaxed text-slate-100">
                 {replyShown}
@@ -512,10 +529,12 @@ export function VoiceStage({ className }: { className?: string }) {
               )}
             </motion.button>
           )}
+          {/* ui-4: h-11 keeps the ≥44px effective target without changing
+              the button's visual scale (py-2 grew the box, not the hit area) */}
           <button
             type="button"
             onClick={endSessionClick}
-            className="flex items-center gap-1.5 rounded-full border border-white/10 px-4 py-2 font-mono text-[11px] uppercase tracking-widest text-slate-400 transition-colors hover:border-rose-400/40 hover:text-rose-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
+            className="flex h-11 items-center gap-1.5 rounded-full border border-white/10 px-4 font-mono text-[11px] uppercase tracking-widest text-slate-400 transition-colors hover:border-rose-400/40 hover:text-rose-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
           >
             <X aria-hidden className="h-3.5 w-3.5" />
             End session
@@ -523,34 +542,48 @@ export function VoiceStage({ className }: { className?: string }) {
         </div>
       )}
 
-      {/* ---------------------------------------- STATE + HINT ROW ---------- */}
+      {/* -------------------------- STATUS ZONE + CONTROL CLUSTER ----------
+          ui-4 redesign — the old single dense mono row mixed information with
+          action; now two zones with two jobs. STATUS (informational): state
+          dot + label + the subordinate normal-case hint. CONTROLS
+          (actionable): one cohesive floating glass pill — face picker ·
+          divider · dream toggle · "type instead" as a quiet text link. All
+          targets grew to 36px (was 24px); the pill is ~470px wide with the six
+          faces, so the zones stack centered below lg and only share a row
+          once the viewport gives it room — pinned apart (justify-between)
+          while the browser window is open, centered otherwise. The pill wraps
+          internally on very narrow screens rather than clipping. */}
       <div
         className={cn(
-          'z-10 flex w-full shrink-0 flex-wrap items-center gap-x-4 gap-y-2 pb-4 font-mono text-[10px] uppercase tracking-[0.22em] sm:text-[11px]',
-          browserOpen ? 'justify-start pl-5 sm:pl-7' : 'justify-center px-4'
+          'z-10 flex w-full shrink-0 flex-col items-center gap-2.5 px-4 pb-4 font-mono text-[10px] uppercase tracking-[0.22em] sm:text-[11px] lg:flex-row lg:gap-5',
+          browserOpen ? 'lg:justify-between lg:pl-5 xl:pl-7' : 'lg:justify-center'
         )}
       >
-        <span
-          className="flex items-center gap-2 transition-colors duration-500"
-          style={{ color: STATE_COLORS[neuralState] }}
-        >
+        {/* status — informational: state dot + label, hint subordinate */}
+        <span className="flex min-w-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 lg:justify-start">
           <span
-            aria-hidden
-            className="h-1.5 w-1.5 rounded-full"
-            style={{
-              backgroundColor: STATE_COLORS[neuralState],
-              boxShadow: `0 0 10px ${STATE_COLORS[neuralState]}`,
-            }}
-          />
-          {STATE_LABELS[neuralState]}
+            className="flex items-center gap-2 transition-colors duration-500"
+            style={{ color: STATE_COLORS[neuralState] }}
+          >
+            <span
+              aria-hidden
+              className="h-1.5 w-1.5 rounded-full"
+              style={{
+                backgroundColor: STATE_COLORS[neuralState],
+                boxShadow: `0 0 10px ${STATE_COLORS[neuralState]}`,
+              }}
+            />
+            {STATE_LABELS[neuralState]}
+          </span>
+          <span className="normal-case tracking-[0.08em] text-slate-500">{hint}</span>
         </span>
-        <span className="normal-case tracking-[0.08em] text-slate-500">{hint}</span>
-        <span className="flex items-center gap-2">
-          {/* face picker — orb / circuit / radial / rain / neural */}
+        {/* controls — actionable: one floating glass cluster of 36px targets */}
+        <span className="mist-glass-soft flex flex-wrap items-center justify-center gap-2 rounded-full px-2 py-1.5">
+          {/* face picker — orb / circuit / radial / rain / neural / visage */}
           <span
             role="group"
             aria-label="Consciousness face"
-            className="flex items-center gap-1 rounded-full border border-white/10 p-0.5"
+            className="flex items-center gap-1"
           >
             {FACES.map(({ id, label, icon: Icon }) => {
               const active = face === id
@@ -563,40 +596,42 @@ export function VoiceStage({ className }: { className?: string }) {
                   aria-label={`Switch consciousness face to ${label}`}
                   aria-pressed={active}
                   className={cn(
-                    'flex h-6 w-6 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60',
+                    'flex h-9 w-9 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60',
                     active
                       ? 'bg-teal-400/15 text-teal-300 shadow-[0_0_10px_rgba(45,212,191,0.25)]'
                       : 'text-slate-500 hover:text-slate-200'
                   )}
                 >
-                  <Icon aria-hidden className="h-3 w-3" />
+                  <Icon aria-hidden className="h-3.5 w-3.5" />
                 </button>
               )
             })}
           </span>
-          <button
-            type="button"
-            onClick={() => setView('chat')}
-            aria-label="Switch to the chat view and type instead"
-            className="flex items-center gap-1.5 rounded-full border border-white/10 px-2.5 py-1 text-slate-400 transition-colors hover:border-purple-400/40 hover:text-purple-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
-          >
-            <PenLine aria-hidden className="h-3 w-3" />
-            Type instead
-            <ArrowRight aria-hidden className="h-3 w-3" />
-          </button>
+          <span aria-hidden className="h-4 w-px bg-white/10" />
           <button
             type="button"
             onClick={toggleDream}
             title="Dream state — memory consolidation"
             aria-label="Toggle dream state — memory consolidation"
             className={cn(
-              'flex h-7 w-7 items-center justify-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60',
+              'flex h-9 w-9 items-center justify-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60',
               neuralState === 'dreaming'
                 ? 'border-fuchsia-400/50 bg-fuchsia-400/15 text-fuchsia-300'
                 : 'border-white/10 text-slate-400 hover:border-fuchsia-400/40 hover:text-fuchsia-300'
             )}
           >
             <Moon aria-hidden className="h-3.5 w-3.5" />
+          </button>
+          {/* type instead — quiet tertiary text link; icon-only under sm */}
+          <button
+            type="button"
+            onClick={() => setView('chat')}
+            aria-label="Switch to the chat view and type instead"
+            className="inline-flex h-9 items-center gap-1.5 rounded-full px-2.5 text-slate-400 underline-offset-4 transition-colors hover:text-purple-200 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
+          >
+            <PenLine aria-hidden className="h-3 w-3" />
+            <span className="hidden sm:inline">Type instead</span>
+            <ArrowRight aria-hidden className="hidden h-3 w-3 sm:block" />
           </button>
         </span>
       </div>

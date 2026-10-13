@@ -15,8 +15,9 @@
 import { useEffect, useRef } from 'react'
 import { motion, useSpring, useTransform } from 'framer-motion'
 import { useMistStore } from '@/lib/store'
+import { tabVisibility } from '@/lib/tab-visibility'
 import { PROVIDER_LABELS, STATE_COLORS, STATE_LABELS } from '@/lib/mist-constants'
-import { mistAudioEnergy, mistAudioSpectrum } from '@/lib/audio-bus'
+import { mistAudioEnergy, mistAudioSpectrum, micEnergy } from '@/lib/audio-bus'
 import { mistSpeech } from '@/lib/speech'
 import { fireInterrupt } from '@/lib/interrupt-bus'
 import { cn } from '@/lib/utils'
@@ -262,6 +263,214 @@ export function NeuralCore({
     let cssSize = 1
     let dpr = 1
     let running = true
+    // Phase 4-a · P4: off-view pause — an IntersectionObserver on the
+    // container stops the loop when the orb scrolls out of the viewport
+    // (docked corner, clipped stages), exactly like the hidden-tab pause.
+    let inView = true
+
+    /** Quantize a 0..1 driver — sprite scales/alphas use the same bucket the
+     *  pre-sprite gradients used, so the visual steps stay imperceptible. */
+    const bucket = (v: number, steps = 16) => Math.round(v * steps) / steps
+
+    // ================================================================
+    // Phase 4-a · P4 — THE SPRITE CACHE.
+    //
+    // Every static gradient layer (halo, ground-glow, core, nucleus, glint,
+    // counter-glint) plus ONE universal glow is pre-rendered into an
+    // offscreen sprite sheet; the per-frame tick only drawImage()s (scale +
+    // alpha for the soft layers, centered draws for the moving glows: ring
+    // pulses, comet trails, bright particles, spectrum tips). ZERO gradient
+    // construction and ZERO shadowBlur assignments remain inside the tick.
+    //
+    // Rebuild triggers: resize (geometry) + the quantized converged color
+    // (the color melt is slow — a handful of rebuilds during a transition,
+    // then none; pure-resize rebuild is impossible while the melt exists).
+    // ================================================================
+    interface SpriteRect {
+      x: number
+      y: number
+      /** square sprites — one size is enough */
+      w: number
+      /** the CSS-unit radius this sprite was baked at (scale denominator) */
+      baseR: number
+      /** the alpha the stops were baked at (globalAlpha denominator) */
+      baseA: number
+    }
+    interface OrbSprites {
+      size: number
+      colorKey: string
+      sheet: HTMLCanvasElement
+      glow: SpriteRect
+      halo: SpriteRect
+      core: SpriteRect
+      nucleus: SpriteRect
+      glint: SpriteRect
+      cg: SpriteRect
+      gg: SpriteRect
+    }
+    let sprites: OrbSprites | null = null
+
+    /** The ONE place gradient objects are constructed (see the speed test's
+     *  source-of-truth scan). */
+    function buildOrbSprites(size: number, colorKey: string, col: RGB): OrbSprites {
+      const coreR0 = (size / 2) * 0.52
+      // Exact boxes: every sprite's box is 2× its baked real-world radius, so
+      // a scale-1 draw is pixel-exact and stop-1 (alpha 0) sits exactly at the
+      // box edge — no hard cuts, no size drift.
+      const GLOW = 64 // the moving-glow sprite is drawn at small radii; fixed res is plenty
+      const haloR0 = coreR0 * 1.85
+      const nucR0 = coreR0 * 0.3
+      const glintR0 = coreR0 * 0.27
+      const cgR0 = coreR0 * 0.12
+      const ggR0 = coreR0 * 0.74
+      const box = (r: number) => Math.max(4, Math.ceil(r * 2))
+      const GLOW_BOX = GLOW
+      const HALO = box(haloR0)
+      const CORE = box(coreR0)
+      const NUC = box(nucR0)
+      const GLINT = box(glintR0)
+      const CG = box(cgR0)
+      const GG = box(ggR0)
+      // rows: [glow | halo] / [core] / [nucleus | glint | cg | gg]
+      const yRow1 = 0
+      const yRow2 = HALO
+      const yRow3 = HALO + CORE
+      const xNuc = 0
+      const xGlint = NUC
+      const xCg = NUC + GLINT
+      const xGg = NUC + GLINT + CG
+      const sheetW = Math.max(GLOW + HALO, CORE, xGg + GG)
+      const sheetH = yRow3 + Math.max(NUC, GLINT, CG, GG)
+      const sheet = document.createElement('canvas')
+      const S = dpr
+      sheet.width = Math.ceil(sheetW * S)
+      sheet.height = Math.ceil(sheetH * S)
+      const c = sheet.getContext('2d')
+      if (!c) {
+        // exotic env: sheet construction failed — every rect zeroed, every
+        // draw no-ops; the orb degrades to lines + solid fills, never crashes
+        const z: SpriteRect = { x: 0, y: 0, w: 0, baseR: 1, baseA: 1 }
+        return { size, colorKey, sheet, glow: z, halo: z, core: z, nucleus: z, glint: z, cg: z, gg: z }
+      }
+      c.setTransform(S, 0, 0, S, 0, 0)
+
+      const radial = (cx: number, cy: number, r: number, stops: Array<[number, string]>) => {
+        const g = c.createRadialGradient(cx, cy, 0, cx, cy, r)
+        for (const [at, color] of stops) g.addColorStop(at, color)
+        return g
+      }
+      /** paint one sprite: full-box radial fill + its rect */
+      const mk = (x: number, y: number, w: number, baseR: number, baseA: number, stops: Array<[number, string]>): SpriteRect => {
+        c.fillStyle = radial(x + w / 2, y + w / 2, w / 2, stops)
+        c.fillRect(x, y, w, w)
+        return { x, y, w, baseR, baseA }
+      }
+
+      // (1) universal glow — white-tinted center → color fade. Used by every
+      // moving-position light (pulses, comets, bright particles, bar tips).
+      const glow = mk(0, yRow1, GLOW_BOX, GLOW / 2, 1, [
+        [0, rgba(mix(col, WHITE, 0.6), 1)],
+        [1, rgba(col, 0)],
+      ])
+
+      // (2) halo — baked at the max rest radius (coreR0 × 1.85), stop alpha
+      // at its max (0.36); the tick scales/alphas down with the envelope.
+      const halo = mk(GLOW, yRow1, HALO, haloR0, 0.36, [
+        [0, rgba(col, 0.36)],
+        [0.55, rgba(col, 0.05)],
+        [1, rgba(col, 0)],
+      ])
+
+      // (3) core — the exact pre-sprite gradient (off-center highlight →
+      // rim shading) baked at coreR0; the tick scales with `breathe`.
+      const core = (() => {
+        const cx = GLOW + HALO / 2
+        const cy = yRow2 + CORE / 2
+        const scale = CORE / 2 / coreR0 // real-radius → paint-space factor
+        const g = c.createRadialGradient(
+          cx - coreR0 * 0.22 * scale,
+          cy - coreR0 * 0.26 * scale,
+          coreR0 * 0.08 * scale,
+          cx,
+          cy,
+          coreR0 * scale
+        )
+        g.addColorStop(0, rgba(mix(col, WHITE, 0.65), 0.92))
+        g.addColorStop(0.38, rgba(mix(col, WHITE, 0.18), 0.6))
+        g.addColorStop(0.78, rgba(mix(col, BLACK, 0.35), 0.34))
+        g.addColorStop(1, rgba(mix(col, BLACK, 0.6), 0.06))
+        c.fillStyle = g
+        c.fillRect(GLOW, yRow2, CORE, CORE)
+        return { x: GLOW, y: yRow2, w: CORE, baseR: coreR0, baseA: 1 }
+      })()
+
+      // (4) nucleus — baked at its max radius and max stop alpha (0.95);
+      // the tick scales/alphas with load + pulse + bounce.
+      const nucleus = mk(xNuc, yRow3, NUC, nucR0, 0.95, [
+        [0, rgba(mix(col, WHITE, 0.85), 0.95)],
+        [1, rgba(col, 0)],
+      ])
+
+      // (5) glint — baked at its max radius and max stop alpha (0.56);
+      // the tick scales/alphas with bounce.
+      const glint = mk(xGlint, yRow3, GLINT, glintR0, 0.56, [
+        [0, rgba(WHITE, 0.56)],
+        [0.55, rgba(WHITE, 0.08)],
+        [1, rgba(WHITE, 0)],
+      ])
+
+      // (6) counter-glint — fixed relative geometry; scales with the core.
+      const cg = mk(xCg, yRow3, CG, cgR0, 0.16, [
+        [0, rgba(mix(col, WHITE, 0.7), 0.16)],
+        [1, rgba(col, 0)],
+      ])
+
+      // (7) ground-glow — baked at its max radius and max alpha (0.2);
+      // the tick scales/alphas with the bounce.
+      const gg = mk(xGg, yRow3, GG, ggR0, 0.2, [
+        [0, rgba(col, 0.2)],
+        [1, rgba(col, 0)],
+      ])
+
+      return { size, colorKey, sheet, glow, halo, core, nucleus, glint, cg, gg }
+    }
+
+    /** Centered sprite draw in CSS units (source rect × dpr). */
+    const drawSprite = (
+      s: OrbSprites,
+      rect: SpriteRect,
+      x: number,
+      y: number,
+      radius: number,
+      alpha: number
+    ) => {
+      if (rect.w === 0) return
+      const scale = radius / rect.baseR
+      const w = rect.w * scale
+      ctx.globalAlpha = Math.max(0, Math.min(1, alpha / rect.baseA))
+      ctx.drawImage(
+        s.sheet,
+        rect.x * dpr,
+        rect.y * dpr,
+        rect.w * dpr,
+        rect.w * dpr,
+        x - w / 2,
+        y - w / 2,
+        w,
+        w
+      )
+      ctx.globalAlpha = 1
+    }
+
+    // ---- Phase 4-a · P4: EMA render quality ----
+    // A rolling frame-time EMA steps the render quality DOWN when the orb
+    // cannot hold 55fps (fewer particles/comets/ticks) and back UP when
+    // headroom returns (hysteresis, evaluated ~1×/s, never mid-ceremony).
+    let emaFrameMs = 16.7
+    let quality = 0 // 0 = high · 1 = medium · 2 = low
+    let lastQualityCheck = 0
+    const QUALITY_PARTICLE_SCALE = [1, 0.65, 0.4] as const
+    const QUALITY_TICKS = [64, 48, 32] as const
 
     const resize = () => {
       const rect = container.getBoundingClientRect()
@@ -269,10 +478,25 @@ export function NeuralCore({
       dpr = Math.min(window.devicePixelRatio || 1, 2)
       canvas.width = Math.round(cssSize * dpr)
       canvas.height = Math.round(cssSize * dpr)
+      // P4: geometry changed → the sprite sheet bakes at the new size
+      sprites = null
     }
     const observer = new ResizeObserver(resize)
     observer.observe(container)
     resize()
+
+    // Off-view pause: the orb scrolled out of the viewport → stop the loop.
+    const io = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.some((e) => e.isIntersecting)
+        if (visible === inView) return
+        inView = visible
+        if (inView) start()
+        else stop()
+      },
+      { threshold: 0.01 }
+    )
+    io.observe(container)
 
     const sim = simRef.current
 
@@ -283,20 +507,23 @@ export function NeuralCore({
     }
     window.addEventListener('pointermove', onPointerMove, { passive: true })
 
-    // Pause the loop when the tab is hidden (no battery burn).
+    // Pause the loop while the tab is hidden (no battery burn). Phase 3-b:
+    // the pause now rides the SHARED visibility store (lib/tab-visibility.ts)
+    // — one document listener app-wide instead of one per surface.
     const stop = () => {
       running = false
       if (raf) cancelAnimationFrame(raf)
       raf = 0
     }
     const onVisibility = () => {
-      if (document.hidden) {
-        stop()
-      } else {
+      if (tabVisibility().getSnapshot()) {
         start()
+      } else {
+        stop()
       }
     }
-    document.addEventListener('visibilitychange', onVisibility)
+    const unsubVisibility = tabVisibility().subscribe(onVisibility)
+    if (!tabVisibility().getSnapshot()) stop()
 
     const seedParticles = (count: number) => {
       while (sim.particles.length < count) sim.particles.push(makeParticle())
@@ -391,7 +618,9 @@ export function NeuralCore({
           }
         } else if (cState === 'listening') {
           // gentle attention floor so a quiet room doesn't freeze the orb
-          target = Math.max(store.neural.audioEnergy, 0.1 + 0.05 * Math.sin(t * 2))
+          // (Phase 4-a: the mic energy rides the audio bus — a plain read,
+          // no store subscription, no re-render)
+          target = Math.max(micEnergy(), 0.1 + 0.05 * Math.sin(t * 2))
         }
         // frame-rate independent follower: fast attack (~50ms), slower
         // release (~200ms) — identical feel at 20fps and 60fps
@@ -422,6 +651,13 @@ export function NeuralCore({
         ? mix(sim.color, target2, 0.05)
         : mix(sim.color, target2, Math.min(1, dt * 2.5))
       const col = sim.color
+      // P4: the per-frame color STRINGS are built once here; the quantized
+      // key drives the sprite rebuild (a slow melt = a handful of rebuilds).
+      const ck = `${Math.round(col[0])},${Math.round(col[1])},${Math.round(col[2])}`
+      if (!sprites || sprites.size !== cssSize || sprites.colorKey !== ck) {
+        sprites = buildOrbSprites(cssSize, ck, col)
+      }
+      const sp = sprites
 
       const cx = cssSize / 2
       const cy = cssSize / 2
@@ -438,40 +674,35 @@ export function NeuralCore({
       }
 
       // (a) ambient halo — breathes with the audio envelope (full) or a slow
-      // calm sine (calm mode) so the orb never reads as frozen
+      // calm sine (calm mode) so the orb never reads as frozen.
+      // P4: sprite draw — the pre-baked radial scaled to the live radius,
+      // alpha-modulated by the envelope (no gradient construction here).
       const calmSway = 0.5 + 0.5 * Math.sin(t * 0.9)
       const haloR = animate
-        ? coreR * (1.35 + env * 0.5)
-        : coreR * (1.34 + 0.05 * calmSway)
-      const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, haloR)
-      halo.addColorStop(0, rgba(col, animate ? 0.14 + env * 0.22 : 0.13 + 0.06 * calmSway))
-      halo.addColorStop(0.55, rgba(col, 0.05))
-      halo.addColorStop(1, rgba(col, 0))
-      ctx.fillStyle = halo
-      ctx.beginPath()
-      ctx.arc(cx, cy, haloR, 0, Math.PI * 2)
-      ctx.fill()
+        ? coreR * (1.35 + bucket(env, 8) * 0.5)
+        : coreR * (1.34 + 0.05 * bucket(calmSway, 8))
+      const haloA = animate
+        ? 0.14 + bucket(env, 8) * 0.22
+        : 0.13 + 0.06 * bucket(calmSway, 8)
+      drawSprite(sp, sp.halo, cx, cy, haloR, haloA)
 
       // (a2) energy ground-glow — a soft reflection pool beneath the orb. It
       // thins and dims as the core hops (speaking bounce) so the dance reads
       // as weightless: the orb lifts, its reflection lets go.
       {
         const ggY = cy + coreR * 1.58
-        const ggR = coreR * (0.74 - bouncePreview * 0.18)
+        const ggR = coreR * (0.74 - bucket(bouncePreview) * 0.18)
+        const ggA = (animate ? 0.2 : 0.13) * (1 - bucket(bouncePreview) * 0.6)
         ctx.save()
         ctx.translate(cx, ggY)
         ctx.scale(1, 0.26)
-        const gg = ctx.createRadialGradient(0, 0, 0, 0, 0, ggR)
-        gg.addColorStop(0, rgba(col, (animate ? 0.2 : 0.13) * (1 - bouncePreview * 0.6)))
-        gg.addColorStop(1, rgba(col, 0))
-        ctx.fillStyle = gg
-        ctx.beginPath()
-        ctx.arc(0, 0, ggR, 0, Math.PI * 2)
-        ctx.fill()
+        drawSprite(sp, sp.gg, 0, 0, ggR, ggA)
         ctx.restore()
       }
 
-      // (b) shockwaves — the consciousness-shift tell (additive bloom)
+      // (b) shockwaves — the consciousness-shift tell (additive bloom).
+      // P4: shadowBlur is gone — the bloom is a wide, faint second stroke
+      // (double-stroke bloom), visually equivalent at a fraction of the cost.
       if (sim.waves.length > 0) {
         ctx.save()
         ctx.globalCompositeOperation = 'lighter'
@@ -491,10 +722,17 @@ export function NeuralCore({
           // size the reach is capped so alpha hits 0 before the border)
           const waveRoom = Math.max(12, cssSize / 2 - 8 - coreR * 1.05)
           const r = coreR * 1.05 + ease * Math.min(w.maxR * (cssSize / 640), waveRoom)
-          ctx.strokeStyle = rgba(col, 0.5 * (1 - p) ** 1.5)
-          ctx.lineWidth = w.lw * (1 - p) + 0.4
-          ctx.shadowColor = rgba(col, 0.8)
-          ctx.shadowBlur = 16 * (1 - p)
+          const main = rgba(col, 0.5 * (1 - p) ** 1.5)
+          const lw = w.lw * (1 - p) + 0.4
+          // crisp ring
+          ctx.strokeStyle = main
+          ctx.lineWidth = lw
+          ctx.beginPath()
+          ctx.arc(cx, cy, r, 0, Math.PI * 2)
+          ctx.stroke()
+          // bloom pass — the wide faint twin
+          ctx.strokeStyle = rgba(col, 0.14 * (1 - p) ** 1.5)
+          ctx.lineWidth = lw * 2.6
           ctx.beginPath()
           ctx.arc(cx, cy, r, 0, Math.PI * 2)
           ctx.stroke()
@@ -505,6 +743,8 @@ export function NeuralCore({
       }
 
       // (c) synaptic rings + traveling light pulses
+      // P4: the pulses draw the pre-baked GLOW sprite (the old per-pulse
+      // radial gradient is gone — zero per-frame gradient construction).
       for (const ring of RINGS) {
         ctx.save()
         ctx.translate(cx, cy)
@@ -518,13 +758,7 @@ export function NeuralCore({
           const a = animate ? p.offset + t * p.speed * (0.7 + sim.speed * 0.4) : p.offset
           const px = Math.cos(a) * coreR * ring.rx
           const py = Math.sin(a) * coreR * ring.ry
-          const g = ctx.createRadialGradient(px, py, 0, px, py, 4 + env * 2)
-          g.addColorStop(0, rgba(mix(col, WHITE, 0.6), 0.85))
-          g.addColorStop(1, rgba(col, 0))
-          ctx.fillStyle = g
-          ctx.beginPath()
-          ctx.arc(px, py, 4 + env * 2, 0, Math.PI * 2)
-          ctx.fill()
+          drawSprite(sp, sp.glow, px, py, (4 + env * 2) * 1.35, 0.85)
         }
         ctx.restore()
       }
@@ -532,7 +766,8 @@ export function NeuralCore({
       // (c2) cognition comets — three arcing electron trails that chase each
       // other around the core while M.I.S.T. thinks. The unambiguous,
       // never-resting "working" tell (with the radar sweep + sparks).
-      if (animate && cState === 'processing') {
+      // P4: sprite segments (no gradients); quality tier 2 drops them.
+      if (animate && cState === 'processing' && quality < 2) {
         ctx.save()
         ctx.globalCompositeOperation = 'lighter'
         const nComets = 3
@@ -545,23 +780,18 @@ export function NeuralCore({
             const px = cx + Math.cos(a) * cr
             const py = cy + Math.sin(a) * cr * 0.92
             const sz = (2.6 * falloff + 0.4) * 3
-            const g2 = ctx.createRadialGradient(px, py, 0, px, py, sz)
-            g2.addColorStop(0, rgba(mix(col, WHITE, 0.5 + 0.35 * falloff), 0.55 * falloff))
-            g2.addColorStop(1, rgba(col, 0))
-            ctx.fillStyle = g2
-            ctx.beginPath()
-            ctx.arc(px, py, sz, 0, Math.PI * 2)
-            ctx.fill()
+            drawSprite(sp, sp.glow, px, py, sz * 1.25, 0.55 * falloff)
           }
         }
         ctx.restore()
       }
 
-      // (c3) HUD tick dial — 64 faint ticks ringing the field. While
-      // processing, a bright chase sweeps the dial (a system-working gauge);
-      // otherwise the ticks breathe gently. Calm mode: static faint structure.
+      // (c3) HUD tick dial — ticks ring the field. While processing, a bright
+      // chase sweeps the dial (a system-working gauge); otherwise the ticks
+      // breathe gently. Calm mode: static faint structure.
+      // P4: the tick count follows the EMA quality tier.
       {
-        const ticks = 64
+        const ticks = QUALITY_TICKS[quality]
         const tr = coreR * 1.5
         const sweepA = (t * 2.4) % (Math.PI * 2)
         const procChase = animate && cState === 'processing'
@@ -630,46 +860,32 @@ export function NeuralCore({
         else ctx.lineTo(px, py)
       }
       ctx.closePath()
-      const core = ctx.createRadialGradient(-r * 0.22, -r * 0.26, r * 0.08, 0, 0, r)
-      core.addColorStop(0, rgba(mix(col, WHITE, 0.65), 0.92))
-      core.addColorStop(0.38, rgba(mix(col, WHITE, 0.18), 0.6))
-      core.addColorStop(0.78, rgba(mix(col, BLACK, 0.35), 0.34))
-      core.addColorStop(1, rgba(mix(col, BLACK, 0.6), 0.06))
-      ctx.fillStyle = core
-      ctx.fill()
+      // P4: the core fill is the pre-baked sprite scaled by `breathe` (the
+      // gradient's geometry was r-relative — scaling is exact).
+      drawSprite(sp, sp.core, 0, 0, r, 1)
 
       // inner nucleus — pulses with load and voice. Calm mode keeps a slow
       // 0.6 rad/s heartbeat so state changes remain perceptible.
+      // P4: sprite scaled/alpha-modulated (was a memoized gradient).
       const pulse = animate
         ? 0.5 + 0.5 * Math.sin(t * (2.2 + cLoad * 4.5))
         : 0.5 + 0.5 * Math.sin(t * (cState === 'processing' ? 1.6 : 0.6))
       const nucleusAlpha = 0.3 + 0.5 * pulse * (0.35 + cLoad * 0.75) + bounce * 0.25
       const nR = coreR * (0.16 + cLoad * 0.08 + bounce * 0.06)
-      const nuc = ctx.createRadialGradient(0, 0, 0, 0, 0, nR)
-      nuc.addColorStop(0, rgba(mix(col, WHITE, 0.85), Math.min(0.95, nucleusAlpha)))
-      nuc.addColorStop(1, rgba(col, 0))
-      ctx.fillStyle = nuc
-      ctx.beginPath()
-      ctx.arc(0, 0, nR, 0, Math.PI * 2)
-      ctx.fill()
+      drawSprite(sp, sp.nucleus, 0, 0, nR, nucleusAlpha)
 
       // (d2) glossy specular glint — a crisp off-center highlight (plus a
       // tiny counter-glint low-right) gives the core physical, glassy
       // presence instead of a flat gradient. It brightens with the voice
       // envelope and rides the squash-stretch transform.
+      // P4: both glints are sprite draws (scale + alpha with the bounce).
       {
+        const k = r / coreR
         const glintX = -r * 0.34
         const glintY = -r * 0.38
-        const glintR = r * (0.22 + bounce * 0.05)
-        const glint = ctx.createRadialGradient(glintX, glintY, 0, glintX, glintY, glintR)
-        glint.addColorStop(0, rgba(WHITE, 0.34 + bounce * 0.22))
-        glint.addColorStop(0.55, rgba(WHITE, 0.08))
-        glint.addColorStop(1, rgba(WHITE, 0))
-        ctx.fillStyle = glint
-        ctx.beginPath()
-        ctx.arc(glintX, glintY, glintR, 0, Math.PI * 2)
-        ctx.fill()
-        // the crisp core of the reflection
+        const glintR = r * (0.22 + bucket(bounce) * 0.05)
+        drawSprite(sp, sp.glint, glintX, glintY, glintR, 0.34 + bucket(bounce) * 0.22)
+        // the crisp core of the reflection (solid fill — no gradient)
         ctx.fillStyle = rgba(WHITE, 0.5 + bounce * 0.25)
         ctx.beginPath()
         ctx.ellipse(glintX, glintY, r * 0.085, r * 0.052, -0.6, 0, Math.PI * 2)
@@ -677,20 +893,16 @@ export function NeuralCore({
         // low counter-glint — sells the sphere's curvature
         const cgX = r * 0.42
         const cgY = r * 0.46
-        const cg = ctx.createRadialGradient(cgX, cgY, 0, cgX, cgY, r * 0.12)
-        cg.addColorStop(0, rgba(mix(col, WHITE, 0.7), 0.16))
-        cg.addColorStop(1, rgba(col, 0))
-        ctx.fillStyle = cg
-        ctx.beginPath()
-        ctx.arc(cgX, cgY, r * 0.12, 0, Math.PI * 2)
-        ctx.fill()
+        drawSprite(sp, sp.cg, cgX, cgY, r * 0.12 * k, 0.16)
       }
       ctx.restore()
 
       // (e) particle field — pseudo-3D elliptical orbits. Calm mode parks
       // the orbits (no angular motion) and lets the stars slowly twinkle
       // (opacity only) so the field still shimmers gently.
-      const want = Math.round(70 + intensity * 60)
+      // P4: the EMA quality tier scales the field density; bright particles
+      // draw the pre-baked glow sprite (was a per-particle gradient).
+      const want = Math.round((70 + intensity * 60) * QUALITY_PARTICLE_SCALE[quality])
       seedParticles(want)
       for (const p of sim.particles) {
         if (animate) p.angle += p.speed * sim.speed * dt
@@ -702,13 +914,7 @@ export function NeuralCore({
           : 0.8 + 0.2 * Math.sin(t * 0.5 + p.zPhase * 9)
         const alpha = (p.bright ? 0.5 + 0.4 * depth : 0.2 + 0.5 * depth) * twinkle
         if (p.bright) {
-          const g = ctx.createRadialGradient(x, y, 0, x, y, size * 3)
-          g.addColorStop(0, rgba(mix(col, WHITE, 0.45), alpha))
-          g.addColorStop(1, rgba(col, 0))
-          ctx.fillStyle = g
-          ctx.beginPath()
-          ctx.arc(x, y, size * 3, 0, Math.PI * 2)
-          ctx.fill()
+          drawSprite(sp, sp.glow, x, y, size * 3.4, alpha)
         } else {
           ctx.fillStyle = rgba(mix(col, WHITE, 0.12), alpha)
           ctx.beginPath()
@@ -718,6 +924,7 @@ export function NeuralCore({
       }
 
       // (f) mirrored radial spectrum — REAL FFT when speaking, mic when listening
+      // P4: the bar bloom is the glow sprite at hot tips (shadowBlur is gone).
       if (animate && (cState === 'listening' || cState === 'speaking')) {
         const bins = 24
         const r0 = coreR * 1.08
@@ -731,7 +938,7 @@ export function NeuralCore({
           if (spectrum) {
             amp = spectrum[i]
           } else if (cState === 'listening') {
-            amp = store.neural.audioEnergy * (0.4 + 0.6 * Math.abs(Math.sin(i * 1.7 + t * 5.2)))
+            amp = micEnergy() * (0.4 + 0.6 * Math.abs(Math.sin(i * 1.7 + t * 5.2)))
           } else {
             amp = talkE * (0.4 + 0.6 * Math.abs(Math.sin(i * 1.7 + t * 5.2)))
           }
@@ -745,9 +952,6 @@ export function NeuralCore({
           const alpha = 0.12 + amp * 0.7
           ctx.strokeStyle = rgba(col, alpha)
           ctx.lineWidth = 2
-          // bloom on the hot bars
-          ctx.shadowColor = rgba(col, 0.9)
-          ctx.shadowBlur = amp > 0.55 ? 12 : 0
           ctx.beginPath()
           ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0)
           ctx.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1)
@@ -758,17 +962,26 @@ export function NeuralCore({
           ctx.moveTo(cx + Math.cos(a2) * r0, cy + Math.sin(a2) * r0)
           ctx.lineTo(cx + Math.cos(a2) * r1, cy + Math.sin(a2) * r1)
           ctx.stroke()
+          // bloom on the hot bars — sprite glow at the tip
+          if (amp > 0.55) {
+            const tipX = cx + Math.cos(a) * r1
+            const tipY = cy + Math.sin(a) * r1
+            drawSprite(sp, sp.glow, tipX, tipY, 9, (amp - 0.55) * 1.5)
+            const tipX2 = cx + Math.cos(a2) * r1
+            const tipY2 = cy + Math.sin(a2) * r1
+            drawSprite(sp, sp.glow, tipX2, tipY2, 9, (amp - 0.55) * 1.5)
+          }
         }
-        ctx.shadowBlur = 0
         // beat comet — the hottest bin gets a glowing head
         if (maxIdx >= 0 && maxAmp > 0.25) {
           const a = (maxIdx / bins) * Math.PI * 2 - Math.PI / 2
           const r1 = r0 + 1.5 + maxAmp * coreR * 0.26 + 4
+          const headX = cx + Math.cos(a) * r1
+          const headY = cy + Math.sin(a) * r1
+          drawSprite(sp, sp.glow, headX, headY, 8, 0.9)
           ctx.fillStyle = rgba(mix(col, WHITE, 0.7), 0.9)
-          ctx.shadowColor = rgba(col, 1)
-          ctx.shadowBlur = 14
           ctx.beginPath()
-          ctx.arc(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1, 2.6, 0, Math.PI * 2)
+          ctx.arc(headX, headY, 2.6, 0, Math.PI * 2)
           ctx.fill()
         }
         ctx.restore()
@@ -854,17 +1067,37 @@ export function NeuralCore({
     }
 
     let last = performance.now()
+    let healFrame = 0
     // One tick, two personalities: full-motion choreography or the calm
     // accessibility mode (slow breathing, twinkle, color melts — no
     // parallax/shockwaves/sparks/bounce/spectrum).
     const tick = (now: number) => {
       if (!running) return
       // heal bitmap drift: entrance transforms can leave the canvas measured
-      // smaller than its final layout (e.g. 272px bitmap in a 300px box)
-      const w = container.getBoundingClientRect().width
-      if (Math.abs(w - cssSize) > 1) resize()
-      const dt = Math.min(0.05, (now - last) / 1000)
+      // smaller than its final layout (e.g. 272px bitmap in a 300px box).
+      // P4-partial: the rect read was PER-FRAME — a forced layout read in the
+      // hot path. The ResizeObserver owns real resizes; this heal now samples
+      // every 30th frame (~2×/s), so a transform drift still heals within
+      // half a second while the tick itself performs zero layout reads.
+      if (++healFrame >= 30) {
+        healFrame = 0
+        const w = container.getBoundingClientRect().width
+        if (Math.abs(w - cssSize) > 1) resize()
+      }
+      const frameMs = now - last
+      const dt = Math.min(0.05, frameMs / 1000)
       last = now
+      // P4: rolling frame-time EMA → quality tier. Step DOWN when the orb
+      // cannot hold ~55fps (EMA > 18.2ms), back UP with headroom (< 14.5ms).
+      // Hysteresis window: evaluated ~1×/s so a single hitch never flaps.
+      if (frameMs > 0 && frameMs < 500) {
+        emaFrameMs = emaFrameMs * 0.9 + frameMs * 0.1
+      }
+      if (now - lastQualityCheck > 1000) {
+        lastQualityCheck = now
+        if (quality < 2 && emaFrameMs > 18.2) quality += 1
+        else if (quality > 0 && emaFrameMs < 14.5) quality -= 1
+      }
       draw(now, dt, reduced ? 'calm' : 'full')
       raf = requestAnimationFrame(tick)
     }
@@ -885,10 +1118,12 @@ export function NeuralCore({
     return () => {
       stop()
       observer.disconnect()
+      io.disconnect()
+      unsubVisibility()
       window.removeEventListener('pointermove', onPointerMove)
-      document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [reduced])
+
 
   const stateColor = STATE_COLORS[state]
   const shimmerWhileOn = state === 'processing' || state === 'awakening'

@@ -80,12 +80,42 @@ export function getEnvPresence(): EnvPresenceResponse {
 export interface EnvSetResult {
   success: boolean
   applied: string[]
+  /** Phase 1 · S6: masked diff {key:{from,to}} — secret-named values are
+   * replaced with `***`; BASE_URLs and other non-secret values are shown in
+   * clear so the owner can see exactly what changed. */
+  diff?: Record<string, { from: string; to: string }>
   error?: string
+}
+
+/** True when a raw URL points at this machine (loopback). Phase 1 · S6:
+ * `*_BASE_URL` / `MIST_BRIDGE_URL` may only be repointed OFF loopback when
+ * MIST_ALLOW_REMOTE_BRIDGE=1 — otherwise a sessioned caller (or a confused
+ * deputy) can silently switch every provider/bridge call to a remote host. */
+export function isLoopbackUrl(raw: string): boolean {
+  try {
+    const host = new URL(raw).hostname.toLowerCase()
+    return host === 'localhost' || host === '::1' || host === '0.0.0.0' || /^127\.\d+\.\d+\.\d+$/.test(host)
+  } catch {
+    return false
+  }
+}
+
+/** Keys whose VALUE is a machine endpoint that must stay loopback by default. */
+function isBaseUrlKey(key: string): boolean {
+  return key === 'MIST_BRIDGE_URL' || /_BASE_URL$/.test(key)
+}
+
+const SECRET_NAME_RE = /(KEY|TOKEN|SECRET|PASSWORD)/i
+
+function maskValue(key: string, value: string): string {
+  return SECRET_NAME_RE.test(key) && value.length > 0 ? '***' : value
 }
 
 /**
  * Merge-write vars to .env (preserving unrelated lines, updating existing keys),
- * mirror into process.env. Values are NEVER echoed back.
+ * mirror into process.env. Returns a masked diff: secret-named keys
+ * (KEY/TOKEN/SECRET/PASSWORD) show `***` for from/to; non-secret values
+ * (e.g. BASE_URLs) are shown in clear — raw secrets are never echoed.
  */
 export async function setEnvVars(
   vars: unknown,
@@ -111,6 +141,18 @@ export async function setEnvVars(
     if (value.includes('\n') || value.includes('\r')) {
       return { success: false, applied: [], error: `value for ${key} must be a single line` }
     }
+    // Phase 1 · S6: endpoint keys stay loopback unless the owner explicitly
+    // opted into a remote bridge/gateway (PC package sets the flag). An empty
+    // value (clearing the override) is always allowed.
+    if (isBaseUrlKey(key) && value.length > 0 && !isLoopbackUrl(value)) {
+      if (process.env.MIST_ALLOW_REMOTE_BRIDGE !== '1') {
+        return {
+          success: false,
+          applied: [],
+          error: `${key} must point at this machine (127.0.0.1/localhost) — set MIST_ALLOW_REMOTE_BRIDGE=1 in .env to allow a remote bridge/gateway`,
+        }
+      }
+    }
   }
 
   const file = envFilePath()
@@ -126,18 +168,21 @@ export async function setEnvVars(
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
 
   const applied: string[] = []
+  const diff: Record<string, { from: string; to: string }> = {}
   for (const [key, value] of entries as [string, string][]) {
     const prefix = `${key}=`
     const idx = lines.findIndex((l) => l.startsWith(prefix) || l.startsWith(`${key} =`))
     if (idx >= 0) lines[idx] = `${key}=${value}`
     else lines.push(`${key}=${value}`)
+    const previous = process.env[key] ?? ''
     process.env[key] = value
     applied.push(key)
+    diff[key] = { from: maskValue(key, previous), to: maskValue(key, value) }
   }
 
   await fs.writeFile(file, `${lines.join('\n')}\n`, 'utf-8')
   recordActivity('config', `env updated: ${applied.join(', ')}`)
-  return { success: true, applied }
+  return { success: true, applied, diff }
 }
 
 // ---------- provider-key self-heal (sandbox snapshot recovery) ----------

@@ -3,7 +3,7 @@ name: research-first
 description: The ritual — before ANY development, coding, or high-stakes task, verify current (2026) best practices with web_search instead of trusting stale training data; incorporate findings, then execute
 trigger: Before starting any dev task, coding task, important mission, or when the creator says "research first" or asks for the ritual
 created: 2026-10-01T07:35:00.000Z
-tool_chain: ["web_search","page_read","mission_start","mist_self_patch"]
+tool_chain: ["web_search","mission_start","mist_self_patch"]
 ---
 
 # research-first

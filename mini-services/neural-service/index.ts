@@ -1,11 +1,25 @@
 // M.I.S.T. neural stream service — WebSocket /ws/neural (frozen contract).
 // Serves the consciousness protocol on port 3003 and relays thoughts to the
 // Next.js backend (http://127.0.0.1:3000/api/mist/llm/unified).
-import { createServer } from 'http'
+//
+// Phase 1 · S10/S12: binds 127.0.0.1 (MIST_LAN=1 widens to 0.0.0.0 for the
+// PC LAN), socket allowRequest at the door (see the gate below), and every
+// outbound :3000 call carries x-mist-service so the app perimeter lets the
+// relay through without a browser session.
+import { createServer, type IncomingMessage } from 'http'
 import { Server, type Socket } from 'socket.io'
+import {
+  SERVICE_HEADER,
+  getMistSecrets,
+  hostnameOf,
+  isLoopbackHost,
+  originHost,
+} from '../lib/perimeter'
 
 const PORT = 3003
 const BACKEND = process.env.MIST_BACKEND_URL ?? 'http://127.0.0.1:3000'
+const LAN = process.env.MIST_LAN === '1'
+const BIND_HOST = LAN ? '0.0.0.0' : '127.0.0.1'
 
 type ConsciousnessState =
   | 'dormant'
@@ -36,23 +50,6 @@ interface InFlightThought {
   cancelledByUser: boolean
 }
 const inFlight = new Map<string, InFlightThought>()
-
-// ---------------- gemini browser relay (w8) ----------------
-// The backend's Gemini egress can be region-blocked while the creator's
-// browser sits in a supported region — the SAME asymmetry the voice engine
-// solves browser-direct. Sockets that emit 'relay_offer' announce a
-// Google-capable browser (key configured + one-shot probe passed);
-// POST /relay/gemini borrows one for a single generateContent round trip.
-// Purely additive to the frozen consciousness protocol — a client that
-// never offers simply never gets asked.
-const relaySockets = new Set<string>()
-interface RelayPending {
-  resolve: (v: { ok: boolean; text?: string; error?: string }) => void
-  timer: ReturnType<typeof setTimeout>
-  socketId: string
-}
-const relayPending = new Map<string, RelayPending>()
-let relaySeq = 0
 
 // ---------------- shared caches (30s) ----------------
 interface Cache<T> {
@@ -92,7 +89,13 @@ async function fetchJson<T>(
   try {
     const res = await fetch(`${BACKEND}${path}`, {
       ...init,
-      headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+      headers: {
+        'Content-Type': 'application/json',
+        // intra-machine service credential — the app perimeter (proxy.ts)
+        // requires a session OR this secret on every non-GET /api/mist call
+        [SERVICE_HEADER]: getMistSecrets().sessionSecret,
+        ...(init?.headers ?? {}),
+      },
       signal,
     })
     if (!res.ok) throw new Error(`backend ${res.status}`)
@@ -208,7 +211,11 @@ async function streamUnified(
   try {
     const res = await fetch(`${BACKEND}${path}`, {
       ...init,
-      headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+      headers: {
+        'Content-Type': 'application/json',
+        [SERVICE_HEADER]: getMistSecrets().sessionSecret, // app perimeter: intra-machine trust
+        ...(init?.headers ?? {}),
+      },
       signal,
     })
     if (!res.ok) throw new Error(`backend ${res.status}`)
@@ -356,8 +363,16 @@ let responseCount = 0
 
 function targetLoad(state: ConsciousnessState, energy: number): number {
   switch (state) {
-    case 'processing':
-      return 0.62 + Math.random() * 0.18
+    case 'processing': {
+      // Phase 3-a · R2: REAL load — the old line was `0.62 + Math.random() * 0.18`
+      // (pure theater). The honest signal this service already has: how many
+      // thought streams are ACTUALLY in flight right now (the inFlight cancel
+      // registry is maintained per thought) + a small recency bump when a
+      // response just landed. Keeps the 0..1 shape; loses the lie.
+      const streams = inFlight.size
+      const justAnswered = Date.now() - lastResponseAt < 4000 ? 0.08 : 0
+      return Math.min(0.95, 0.5 + Math.min(0.35, streams * 0.15) + justAnswered)
+    }
     case 'listening':
       return 0.24 + energy * 0.35
     case 'speaking':
@@ -398,93 +413,50 @@ const httpServer = createServer()
 const io = new Server(httpServer, {
   // DO NOT change the path — Caddy forwards on it
   path: '/',
-  cors: { origin: '*', methods: ['GET', 'POST'] },
+  // Phase 1 · S10: no CORS reflection — same-origin (through the gateway)
+  // and direct-PC loopback browsers need none, and cross-origin browser
+  // polling must NOT get an ACAO. The real gate is allowRequest below.
+  cors: { origin: [], methods: ['GET', 'POST'] },
   pingTimeout: 60000,
   pingInterval: 25000,
-})
-
-// w8 — the backend's gemini lane calls this when its own Google egress is
-// region-blocked: borrow one relay-capable browser for a single text round
-// trip. Lives on its OWN localhost-only listener (port 3013): the socket.io
-// path is '/' and engine.io therefore answers every request that shares its
-// port ("Transport unknown") — a separate server sidesteps that entirely and
-// keeps the frozen consciousness contract untouched.
-const RELAY_PORT = 3013
-const relayServer = createServer()
-relayServer.on('request', (req, res) => {
-  if (req.method !== 'POST' || !req.url?.startsWith('/relay/gemini')) {
-    if (!res.writableEnded) {
-      res.writeHead(404, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: false, error: 'relay: not found' }))
+  // engine.io 6.6 convention (verified empirically — NOT the socket.io docs'
+  // `next(err)`: here arg1 is the DENIAL MESSAGE and MUST be a string —
+  // `next(new Error(...), false)` made abortUpgrade run Buffer.byteLength()
+  // on an Error instance → uncaught TypeError → the whole service died on
+  // every denied websocket upgrade. arg2 false = refuse.
+  allowRequest: (req: IncomingMessage, next: (message: string | null, success: boolean) => void) => {
+    // The door (ADR-0002 — dynamic same-origin, never a static host list):
+    //   1. no Origin AND loopback remote → the owner's tooling / non-browser
+    //      clients on this machine (bun tests, curl-style callers)
+    //   2. Origin loopback AND Host loopback → direct-PC browser (page on
+    //      :3000, socket here on :3003 — cross-port, same machine)
+    //   3. Origin hostname === Host hostname → the sandbox gateway path
+    //      (external Host preserved by Caddy). With a valid mist_session
+    //      cookie (cookies are port-agnostic so the paired browser carries
+    //      them) OR without one — the Origin===Host match itself is the
+    //      browser voucher (ADR-0003): browsers always attach Origin to
+    //      cross-origin requests, so a third-party page can never present
+    //      this shape, but the app inside the preview iframe CAN present it
+    //      even when its SameSite=None cookie is unreplayable (Safari/ITP,
+    //      Chrome 3PC, headless test browsers that omit fetch-metadata —
+    //      Sec-Fetch-Site: same-origin, when present, vouches the same).
+    // Anything else (foreign origins, cookieless gateway-shaped probes) is
+    // refused at the handshake (400 on the ws lane, 403 on polling) with an
+    // honest message — and the service SURVIVES the refusal.
+    const origin = req.headers.origin
+    const host = req.headers.host
+    const remote = req.socket.remoteAddress ?? ''
+    const loopbackRemote =
+      remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
+    if (!origin && loopbackRemote) return next(null, true)
+    const oh = originHost(origin)
+    if (oh && isLoopbackHost(oh) && isLoopbackHost(host)) return next(null, true)
+    if (oh && host && hostnameOf(oh) === hostnameOf(host)) {
+      return next(null, true)
     }
-    return
-  }
-  const chunks: Buffer[] = []
-  req.on('data', (c) => chunks.push(c as Buffer))
-  req.on('end', () => {
-    const respond = (status: number, body: unknown) => {
-      if (res.writableEnded) return
-      res.writeHead(status, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(body))
-    }
-    try {
-      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
-        model?: string
-        systemPrompt?: string
-        messages?: Array<{ role: string; content: string }>
-      }
-      const model = typeof body.model === 'string' && body.model ? body.model : 'gemini-2.0-flash'
-      const systemPrompt = typeof body.systemPrompt === 'string' ? body.systemPrompt : ''
-      const messages = Array.isArray(body.messages)
-        ? body.messages.filter((m) => m && typeof m.content === 'string' && m.content)
-        : []
-      if (messages.length === 0) {
-        respond(400, { ok: false, error: 'relay: no messages' })
-        return
-      }
-      // pick the first live relay-capable socket (round-robin not needed —
-      // one creator, one browser, typically one socket)
-      let target: string | undefined
-      for (const sid of relaySockets) {
-        const s = io.sockets.sockets.get(sid)
-        if (s) {
-          target = sid
-          break
-        }
-        relaySockets.delete(sid) // stale id — clean as we scan
-      }
-      if (!target) {
-        respond(503, { ok: false, error: 'relay: no Google-capable browser connected' })
-        return
-      }
-      const sid = target
-      const socketRef = io.sockets.sockets.get(sid)!
-      const id = `relay-${Date.now()}-${++relaySeq}`
-      void new Promise<{ ok: boolean; text?: string; error?: string }>((resolve) => {
-        const timer = setTimeout(() => {
-          relayPending.delete(id)
-          resolve({ ok: false, error: 'relay: browser timed out (40s)' })
-        }, 40_000)
-        relayPending.set(id, { resolve, timer, socketId: sid })
-        socketRef.emit('relay_gemini_req', { id, model, systemPrompt, messages })
-      }).then((result) => respond(result.ok ? 200 : 502, result))
-    } catch (err) {
-      respond(400, { ok: false, error: `relay: ${err instanceof Error ? err.message : 'bad request'}` })
-    }
-  })
+    next('neural link refused: unknown origin (Phase 1 socket gate)', false)
+  },
 })
-// the relay is a convenience, never a dependency: a port clash or error must
-// never take the consciousness stream down with it
-relayServer.on('error', (err) => {
-  pushLog(`gemini relay listener unavailable: ${err instanceof Error ? err.message : String(err)}`)
-})
-try {
-  relayServer.listen(RELAY_PORT, '127.0.0.1', () => {
-    pushLog(`gemini relay listening on 127.0.0.1:${RELAY_PORT} (browser-borrowed lane)`)
-  })
-} catch (err) {
-  pushLog(`gemini relay could not start: ${err instanceof Error ? err.message : String(err)}`)
-}
 
 io.on('connection', (socket: Socket) => {
   const conn: ConnState = { provider: 'auto', model: '', state: 'awakening', audioEnergy: 0 }
@@ -585,7 +557,8 @@ io.on('connection', (socket: Socket) => {
         type: 'consciousness_response',
         text: (res.text as string) ?? '',
         emotion: (res.emotion as string) ?? 'calm',
-        neural_load: Math.min(0.95, 0.45 + Math.random() * 0.15),
+        // Phase 3-a · R2: the REAL lerped load (streams-in-flight derived), not 0.45+rand*0.15 theater
+        neural_load: Math.round(Math.min(0.95, globalLoad) * 1000) / 1000,
         memory_context: {
           facts_recalled: (res.memory_context as { facts_recalled?: number } | undefined)?.facts_recalled ?? 0,
           vectors_searched: (res.memory_context as { vectors_searched?: number } | undefined)?.vectors_searched ?? 0,
@@ -709,29 +682,6 @@ io.on('connection', (socket: Socket) => {
     socket.emit('pong', { type: 'pong', timestamp: new Date().toISOString() })
   })
 
-  // w8 relay — this browser announced it can reach Google (key + probe ok)
-  socket.on('relay_offer', (payload: { gemini?: boolean }) => {
-    if (payload?.gemini === true) {
-      relaySockets.add(socket.id)
-      socket.emit('relay_ack', { gemini: true })
-    }
-  })
-
-  // w8 relay — a borrowed round trip came back (or failed honestly)
-  socket.on('relay_gemini_res', (payload: { id?: string; ok?: boolean; text?: string; error?: string }) => {
-    const id = typeof payload?.id === 'string' ? payload.id : ''
-    const pending = relayPending.get(id)
-    if (!pending) return // unknown or already timed out — nothing to do
-    clearTimeout(pending.timer)
-    relayPending.delete(id)
-    const ok = payload.ok === true && typeof payload.text === 'string' && payload.text.length > 0
-    pending.resolve({
-      ok,
-      text: ok ? (payload.text as string) : undefined,
-      error: ok ? undefined : String(payload.error ?? 'relay generation failed').slice(0, 300),
-    })
-  })
-
   socket.on('disconnect', () => {
     clearTimeout(dormTimer)
     // a dropped link abandons its in-flight thought registry entry (the
@@ -741,15 +691,6 @@ io.on('connection', (socket: Socket) => {
       flight.cancelledByUser = true // silence the offline fallback too
       flight.controller.abort()
       inFlight.delete(socket.id)
-    }
-    // w8 — a relay browser that leaves must not strand borrowed requests
-    relaySockets.delete(socket.id)
-    for (const [id, pending] of relayPending) {
-      if (pending.socketId === socket.id) {
-        clearTimeout(pending.timer)
-        relayPending.delete(id)
-        pending.resolve({ ok: false, error: 'relay: browser disconnected mid-request' })
-      }
     }
     conns.delete(socket.id)
     pushLog(`synapse link closed (${conns.size} active)`)
@@ -835,8 +776,11 @@ setInterval(() => {
   void SYNAPSE_LABELS
 }, 1300)
 
-httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`[mist-neural] /ws/neural streaming on :${PORT} → backend ${BACKEND}`)
+httpServer.listen(PORT, BIND_HOST, () => {
+  console.log(`[mist-neural] /ws/neural streaming on ${BIND_HOST}:${PORT} → backend ${BACKEND}`)
+  if (LAN) {
+    console.log('[mist-neural] ⚠ MIST_LAN=1 — listening on ALL interfaces. Pair every device (/api/mist/pair) and keep the machine on a trusted LAN.')
+  }
 })
 
 process.on('SIGTERM', () => {
@@ -875,3 +819,6 @@ void bootstrapDevGuard()
 // dev-guard re-bootstrap trigger 2026-09-27
 // dev-guard re-bootstrap trigger 2026-09-29 (run 8 OOM recovery — guard pid 1403 dead)
 // dev-guard re-bootstrap trigger 2026-10-05 (w8 session OOM recovery — next-server killed during browser E2E, guard dead)
+// dev-guard re-bootstrap trigger 2026-10-10 (phase1-hardening session OOM recovery — next-server 2.1GB RSS killed during security suite run, guard pid stale 1408, dev server down >10min)
+// dev-guard re-bootstrap trigger 2026-10-11c (phase-4 exit OOM cycle — next-server 2.3GB anon-rss killed twice under browser+compile load; revive chain per ADR-0003)
+// dev-guard re-bootstrap trigger 2026-10-12 (preview-stability session — zombie mini-service sweep + heap cap + guard v3; dev server killed to pick up capped dev script)

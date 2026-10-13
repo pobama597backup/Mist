@@ -19,6 +19,8 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { WatchlistEntry, WatchlistStatus } from '@/lib/types'
 import { recordActivity } from './activity-service'
+import { egressFetch, EgressPausedError } from './egress'
+import { outboundWatchersEnabled } from './settings-service'
 
 const WATCHLIST_FILE = path.join(process.cwd(), 'db', 'watchlist.json')
 const DEFAULT_SWEEP_INTERVAL_H = 6
@@ -103,14 +105,22 @@ export function watchlistAutoUpdate(): boolean {
 
 // ---------- upstream checkers (never throw — errors are recorded per entry) ----------
 
+// Phase 4-b · R5: watcher fetches go through the egress gate — with
+// outbound_watchers disabled this throws EgressPausedError BEFORE any socket
+// opens (a watcher tick performs provably zero network calls).
 async function fetchText(url: string, timeoutMs = 20_000): Promise<string | null> {
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), timeoutMs)
   try {
-    const res = await fetch(url, { signal: ac.signal, cache: 'no-store', headers: { 'User-Agent': 'mist-watchlist' } })
+    const res = await egressFetch(url, {
+      signal: ac.signal,
+      cache: 'no-store',
+      headers: { 'User-Agent': 'mist-watchlist' },
+    })
     if (!res.ok) return null
     return await res.text()
-  } catch {
+  } catch (err) {
+    if (err instanceof EgressPausedError) throw err // surfaced by sweepWatchlist as the honest paused answer
     return null
   } finally {
     clearTimeout(timer)
@@ -163,6 +173,8 @@ async function checkUpstream(entry: WatchlistEntry): Promise<UpstreamVersion | n
 
 export interface SweepResult {
   ok: boolean
+  /** Phase 4-b · R5: true when the sweep idled because outbound watchers are disabled. */
+  paused?: boolean
   changed: WatchlistEntry[]
   checked: number
   message: string
@@ -176,6 +188,19 @@ export interface SweepResult {
  *   3. for openclaw, also triggers the digest sync the evolution engine reads.
  */
 export async function sweepWatchlist(force = false): Promise<SweepResult> {
+  // Phase 4-b · R5: dormant = 0 outbound — the 6h heartbeat sweep AND manual
+  // checks idle while the flag is off; the answer is an honest paused state,
+  // never a fake "all current".
+  if (!(await outboundWatchersEnabled())) {
+    recordActivity('watchlist', 'sweep skipped — outbound watchers disabled (dormant: zero outbound)')
+    return {
+      ok: false,
+      paused: true,
+      changed: [],
+      checked: 0,
+      message: 'watchers paused — outbound is off. Enable watchers in the Upstream tab to allow npmjs/github checks.',
+    }
+  }
   const state = await readState()
   const now = Date.now()
   if (
@@ -202,7 +227,14 @@ export async function sweepWatchlist(force = false): Promise<SweepResult> {
   const checkedAt = new Date().toISOString()
   const entries = await Promise.all(
     state.entries.map(async (entry): Promise<WatchlistEntry> => {
-      const upstream = await checkUpstream(entry)
+      const upstream = await checkUpstream(entry).catch((err): null => {
+        // a flag flipped mid-sweep (EgressPausedError) or a per-entry network
+        // failure — both degrade to "unreachable this round", never a crash
+        if (err instanceof EgressPausedError) {
+          recordActivity('watchlist', 'sweep aborted mid-flight — outbound watchers disabled')
+        }
+        return null
+      })
       if (!upstream) {
         return { ...entry, checked_at: checkedAt, error: 'upstream unreachable' }
       }

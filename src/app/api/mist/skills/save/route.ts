@@ -22,15 +22,18 @@ export async function POST(req: NextRequest) {
     ) {
       return NextResponse.json({ error: 'name and trigger are required' }, { status: 400 })
     }
-    const skill = await saveSkill({
-      name: body.name.trim().slice(0, 120),
-      trigger: body.trigger.trim().slice(0, 400),
-      steps: typeof body.steps === 'string' ? body.steps : '',
-      tool_chain: Array.isArray(body.tool_chain)
-        ? body.tool_chain.filter((t): t is string => typeof t === 'string')
-        : [],
-      notes: typeof body.notes === 'string' ? body.notes : '',
-    })
+    const skill = await saveSkill(
+      {
+        name: body.name.trim().slice(0, 120),
+        trigger: body.trigger.trim().slice(0, 400),
+        steps: typeof body.steps === 'string' ? body.steps : '',
+        tool_chain: Array.isArray(body.tool_chain)
+          ? body.tool_chain.filter((t): t is string => typeof t === 'string')
+          : [],
+        notes: typeof body.notes === 'string' ? body.notes : '',
+      },
+      { source: 'owner-ui' } // Phase 2-c: the owner's own hands — trust 'owner'
+    )
     return NextResponse.json({ success: true, skill })
   } catch (err) {
     return NextResponse.json(

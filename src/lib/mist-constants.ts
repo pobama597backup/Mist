@@ -23,6 +23,7 @@ export const PROVIDER_LABELS: Record<ProviderId, string> = {
   ovh: 'OVHcloud AI',
   qwen: 'Qwen',
   core: 'Mist Core',
+  local: 'Local lane',
   'offline-mind': 'Offline Mind',
   'mist-instant': 'Instant Recall',
 }

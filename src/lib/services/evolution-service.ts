@@ -25,6 +25,14 @@ import { db } from '@/lib/db'
 import { cascadeComplete } from './llm-service'
 import { recordActivity } from './activity-service'
 import { getOpenClawDigest, getOpenClawStatus } from './openclaw-service'
+import { isProtectedPath } from '@/lib/arbiter/risk-table'
+import { getAutonomyScope, scopeRank } from '@/lib/arbiter/wiring'
+import * as lifecycle from './lifecycle'
+import { currentArbiterTurn } from '@/lib/arbiter/turn-context'
+import { appendAuditEvent } from '@/lib/arbiter/audit'
+import { createApproval } from '@/lib/oj/approval-service'
+import { outboundWatchersEnabled } from './settings-service'
+import type { Origin } from '@/lib/arbiter/arbiter'
 import type {
   EvolutionChange,
   EvolutionOrigin,
@@ -951,6 +959,81 @@ export async function runLint(): Promise<{ ok: boolean; output: string }> {
   })
 }
 
+// ---------- Phase 2-c: the A5 apply battery (tsc + real ESLint + tests) ----------
+
+export interface GateCommandResult {
+  ok: boolean
+  output: string
+}
+
+/** One gate command: spawn, 180s cap, honest output. ANY spawn failure,
+ *  timeout or nonzero exit is a FAILURE — a checker that died (the OOM
+ *  killer's empty-output signature) fails the gate now; the old
+ *  degrade-loudly-and-keep-the-commit behaviour is deliberately gone. */
+async function runGateCommandDefault(cmd: string[]): Promise<GateCommandResult> {
+  const { spawn } = await import('node:child_process')
+  return new Promise((resolve) => {
+    let output = ''
+    let settled = false
+    const child = spawn(cmd[0], cmd.slice(1), { cwd: PROJECT_ROOT, env: { ...process.env } })
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true
+        child.kill('SIGKILL')
+        resolve({ ok: false, output: `${output}\n(gate '${cmd.join(' ')}' timed out after ${LINT_TIMEOUT_MS}ms)` })
+      }
+    }, LINT_TIMEOUT_MS)
+    child.stdout?.on('data', (d) => {
+      output += String(d)
+      if (output.length > 120_000) output = output.slice(-120_000)
+    })
+    child.stderr?.on('data', (d) => {
+      output += String(d)
+      if (output.length > 120_000) output = output.slice(-120_000)
+    })
+    child.on('error', (err) => {
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        resolve({ ok: false, output: `gate spawn failed: ${err.message}` })
+      }
+    })
+    child.on('close', (code) => {
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        resolve({ ok: code === 0, output: output.slice(-40_000) })
+      }
+    })
+  })
+}
+
+/** Test seam — tests replace runGateCommand to force gate failures without
+ *  spawning anything (the RAM-tight box thanks them). */
+export const evolutionGates = {
+  runGateCommand: (cmd: string[]) => runGateCommandDefault(cmd),
+}
+
+/** The full post-commit battery (mandate Phase 2: “gate = tsc + real eslint
+ *  + bun test”). The test gate is the SECURITY SUITE — the frozen regression
+ *  net for exactly the surfaces a self-patch could silently break (arbiter
+ *  decisions, perimeter, wiring tickets, persistence trust); the full `bun
+ *  test` (every unit test) would OOM the 4GB box — a documented choice. */
+async function runApplyGates(): Promise<{ ok: boolean; report: string }> {
+  const gates: Array<[string, string[]]> = [
+    ['tsc --noEmit', ['bun', 'x', 'tsc', '--noEmit']],
+    ['eslint (bun run lint)', ['bun', 'run', 'lint']],
+    ['security tests (bun test tests/security/)', ['bun', 'test', 'tests/security/']],
+  ]
+  const parts: string[] = []
+  for (const [label, cmd] of gates) {
+    const r = await evolutionGates.runGateCommand(cmd)
+    parts.push(`--- ${label}: ${r.ok ? 'PASS' : 'FAIL'} ---\n${r.output.slice(-3000)}`)
+    if (!r.ok) return { ok: false, report: `gate failed: ${label}\n\n${parts.join('\n\n')}`.slice(-8000) }
+  }
+  return { ok: true, report: parts.join('\n\n').slice(-8000) }
+}
+
 // Real error signatures only — the colon matters: dev.log is full of prisma:query
 // SELECT lines that contain the word "error" as a column name, which must NOT
 // count (the scanner once flagged its own DB queries — feedback loop).
@@ -1872,8 +1955,60 @@ export async function developProposal(id: string): Promise<EvolutionProposal | n
   return toProposal(updated)
 }
 
-/** Phase 3 — the approval gate fires here: apply, lint, auto-rollback. */
-export async function applyProposal(id: string): Promise<{ proposal: EvolutionProposal | null; message: string }> {
+/** Phase 3 — the approval gate fires here: apply, gates, auto-rollback.
+ *  Phase 2-c (A5/S8): two floors run BEFORE any diff/apply work —
+ *   (1) protected paths (PROTECTED_PATHS) reject and convert to an Approval
+ *       row (file_write, high, with the diff) — she may propose; only the
+ *       owner-authenticated UI applies;
+ *   (2) auto-apply (anything that is not the owner's own approve click) needs
+ *       scope ≥ A3 — below that it is proposal-only, same Approval row.
+ *  The post-commit gate is the full battery: tsc + real ESLint + the
+ *  security suite; ANY failure (incl. a dead/OOM checker) rolls back. */
+export interface ApplyProposalOpts {
+  /** true when the OWNER'S OWN UI invoked this apply (the approve route) —
+ *  the only lane that may apply protected paths, and exempt from the A3
+ *  floor (the owner's hand is the scope). */
+  ownerApproved?: boolean
+}
+
+/** The honest Arbiter origin for evolution audit rows: the executing turn's
+ *  origin when one rides this call, else unattended (the honest default for
+ *  watch-loop/self-tool applies that lost their turn context). */
+function evolutionAuditOrigin(): Origin {
+  return currentArbiterTurn()?.origin ?? 'owner_heartbeat'
+}
+
+/** One bell row for a proposal-only outcome (protected path / below A3):
+ *  file_write tier high with the full diff in the payload. Best-effort —
+ *  the not-applied return is the gate, the row is the review surface. */
+async function fileEvolutionApproval(
+  row: { id: string; title: string },
+  changes: EvolutionChange[],
+  reason: string
+): Promise<void> {
+  try {
+    await createApproval({
+      actionType: 'file_write',
+      title: `evolution: ${row.title}`.slice(0, 160),
+      payload: {
+        proposalId: row.id,
+        reason,
+        paths: [...new Set(changes.map((c) => c.path))],
+        diff: changes,
+        apply_from: 'Diagnostics → Evolve (the owner-authenticated UI)',
+      },
+      tier: 'high',
+      origin: 'arbiter',
+    })
+  } catch {
+    // the bell is UX, not the gate — the honest not-applied result below is
+  }
+}
+
+export async function applyProposal(
+  id: string,
+  opts: ApplyProposalOpts = {}
+): Promise<{ proposal: EvolutionProposal | null; message: string }> {
   const row = await db.evolutionProposal.findUnique({ where: { id } })
   if (!row) return { proposal: null, message: 'proposal not found' }
   if (row.status !== 'pending') return { proposal: toProposal(row), message: `proposal is already ${row.status}` }
@@ -1886,6 +2021,50 @@ export async function applyProposal(id: string): Promise<{ proposal: EvolutionPr
   }
   if (changes.length === 0) {
     return { proposal: toProposal(row), message: 'proposal has no developed changes yet — run Develop first' }
+  }
+
+  // ---- Phase 2-c FLOOR 1 — protected paths reject BEFORE any diff/apply
+  // work (no staging, no spawns, zero tree contact). The owner's own approve
+  // click is the one lane through: she may propose; only the owner UI applies.
+  const allTargets = [...new Set(changes.map((c) => c.path))]
+  const protectedTargets = allTargets.filter((p) => isProtectedPath(p))
+  if (protectedTargets.length > 0 && !opts.ownerApproved) {
+    const reason = `protected path — ${protectedTargets.join(', ')}`
+    await fileEvolutionApproval(row, changes, `${reason}; apply from the owner UI (Diagnostics → Evolve)`)
+    await appendAuditEvent({
+      tool: 'evolution_apply',
+      argsJson: JSON.stringify({ proposalId: id, title: row.title, targets: protectedTargets }).slice(0, 2000),
+      risk: 'self-modify',
+      origin: evolutionAuditOrigin(),
+      decision: 'deny',
+      reason: `${reason} — proposal only; apply from the owner UI`,
+      turnId: currentArbiterTurn()?.turnId ?? null,
+    }).catch(() => undefined)
+    return {
+      proposal: toProposal(row),
+      message: 'protected path — proposal only; apply from the owner UI (Diagnostics → Evolve)',
+    }
+  }
+
+  // ---- Phase 2-c FLOOR 2 — auto-apply needs scope ≥ A3 (A5). The owner's
+  // own approve click is exempt (the owner's hand IS the scope decision).
+  const scope = getAutonomyScope()
+  if (!opts.ownerApproved && scopeRank(scope) < 3) {
+    const reason = `autonomy scope ${scope} < A3`
+    await fileEvolutionApproval(row, changes, `${reason} — proposal only; the owner applies it in Diagnostics → Evolve`)
+    await appendAuditEvent({
+      tool: 'evolution_apply',
+      argsJson: JSON.stringify({ proposalId: id, title: row.title, targets: allTargets }).slice(0, 2000),
+      risk: 'self-modify',
+      origin: evolutionAuditOrigin(),
+      decision: 'defer',
+      reason: `proposal only — ${reason}`,
+      turnId: currentArbiterTurn()?.turnId ?? null,
+    }).catch(() => undefined)
+    return {
+      proposal: toProposal(row),
+      message: `proposal only — the autonomy scope is ${scope}; I can apply it myself at A3+, or the owner applies it now in Diagnostics → Evolve`,
+    }
   }
 
   const { changes: valid } = validateChanges(changes)
@@ -1995,26 +2174,19 @@ export async function applyProposal(id: string): Promise<{ proposal: EvolutionPr
 
         // belt-and-braces: the staged copy is faithful, but the real tree gets
         // the final word — a drift (concurrent edit) rolls back cleanly.
-        // OOM tolerance (defect #13): a checker killed by the kernel dies with
-        // EMPTY output — that is NOT a type error. Degrade loudly (keep the
-        // commit, record what was skipped); only real diagnostics roll back.
-        const lint = await runLint()
-        // a thrashing checker that never finishes is as signal-free as a kill:
-        // empty output OR output that is ONLY the timeout line → degrade
-        const checkerDiedSilently =
-          !lint.ok && (lint.output.trim() === '' || /^\s*\(lint timed out after \d+ms\)\s*$/.test(lint.output))
-        if (lint.ok || checkerDiedSilently) {
+        // Phase 2-c FLIP (mandate: spawn death = gate failure): the old OOM
+        // tolerance that kept the commit when a checker died with empty
+        // output is deliberately GONE — runApplyGates fails closed on ANY
+        // spawn error, timeout or nonzero exit, and the rollback below runs.
+        const battery = await runApplyGates()
+        if (battery.ok) {
           const applied = await db.evolutionProposal.update({
             where: { id },
             data: {
               status: 'applied',
-              lintOutput: lint.ok
-                ? 'staged gates passed (anchor repair + import validation + type-check + runtime import probe) + real-tree tsc clean'
-                : (checkerDiedSilently
-                    ? 'staged gates passed (anchors + imports + runtime import probe' +
-                      (gate.tsc.degraded ? ' — staged type-check SKIPPED: checker OOM-killed twice, not a type error' : ' + staged type-check') +
-                      ') — real-tree tsc SKIPPED: checker OOM-killed (empty output), not a type error. Backup + auto-rollback remain armed.'
-                    : lint.output.slice(-6000)),
+              lintOutput:
+                'staged gates passed (anchor repair + import validation + type-check + runtime import probe) + ' +
+                `real-tree battery green (tsc + eslint + security suite):\n${battery.report.slice(-4000)}`,
               error: null,
               appliedAt: new Date(),
               updatedAt: new Date(),
@@ -2022,8 +2194,19 @@ export async function applyProposal(id: string): Promise<{ proposal: EvolutionPr
           })
           recordActivity(
             'evolution',
-            `SELF-MODIFIED: "${row.title}" committed to live tree (attempt ${attempt}, ${steps.length} change(s)) — hot-reload picks it up`
+            `SELF-MODIFIED: "${row.title}" committed to live tree (attempt ${attempt}, ${steps.length} change(s)) — gates green, hot-reload picks it up`
           )
+          // Phase 2-c: the applied diff lands in the hash-chained audit log —
+          // every self-modification is on the chain with its authorization.
+          await appendAuditEvent({
+            tool: 'evolution_apply',
+            argsJson: JSON.stringify({ proposalId: id, title: row.title, changes: steps }).slice(0, 2000),
+            risk: 'self-modify',
+            origin: evolutionAuditOrigin(),
+            decision: 'allow',
+            reason: opts.ownerApproved ? 'owner-approved proposal' : 'A3 auto-apply gates green',
+            turnId: currentArbiterTurn()?.turnId ?? null,
+          }).catch(() => undefined)
           // mission auto-reverify hook: a mission whose deliverable was this
           // proposal has been waiting in 'awaiting_creator' — re-score it NOW
           // against the live tree (2026-09-27 fairness fix, drill #12).
@@ -2037,19 +2220,22 @@ export async function applyProposal(id: string): Promise<{ proposal: EvolutionPr
             proposal: toProposal(applied),
             message:
               attempt === 1
-                ? 'Applied. All staged gates passed (anchors + imports + type-check + runtime import probe) and the real-tree type-check is clean — the dev server hot-reloads it.'
+                ? 'Applied. All staged gates passed (anchors + imports + type-check + runtime import probe) and the real-tree battery (tsc + ESLint + security tests) is green — the dev server hot-reloads it.'
                 : `Applied after ${attempt - 1} self-repair round(s) — every gate now passes and the dev server hot-reloads it.`,
           }
         }
 
         await rollbackFiles(backupDir, committed.backed, committed.created)
         accumulatedErrors.push(
-          `REAL-TREE TYPE-CHECK FAILED AFTER COMMIT (rolled back — staged gates had passed, likely tree drift):\n${lint.output.slice(-6000)}`
+          `POST-COMMIT GATES FAILED — ROLLED BACK FROM BACKUP (tsc + ESLint + security suite; a dead or timed-out checker fails the gate by design):\n${battery.report}`
         )
         recordActivity(
           'evolution',
-          `real-tree tsc failed for "${row.title}" after staged pass — rolled back, repair round starting`
+          `real-tree battery failed for "${row.title}" after staged pass — rolled back from backup, no repair round (terminal)`
         )
+        // a battery failure is terminal — repair-rounding against a full-suite
+        // failure burns minutes for nothing; the honest result is below
+        break
       } else {
         const parts: string[] = []
         if (gate.anchorNotes.length > 0) parts.push(`ANCHOR ISSUES:\n${gate.anchorNotes.join('\n')}`)
@@ -2075,11 +2261,13 @@ export async function applyProposal(id: string): Promise<{ proposal: EvolutionPr
     data: {
       status: 'rolled_back',
       lintOutput: accumulatedErrors.join('\n\n').slice(-8000) || '(no gate report captured)',
-      error: `staged gates failed after ${MAX_GATE_ATTEMPTS} attempts — the live tree was never touched`,
+      // Phase 2-c honesty: with the terminal battery rollback a commit may
+      // have HAPPENED and been restored — "never touched" would be a lie.
+      error: 'gates failed — every live-tree write was rolled back from its backup (Phase 2-c battery fails closed)',
       updatedAt: new Date(),
     },
   })
-  recordActivity('evolution', `staged gates FAILED for "${row.title}" — rolled back; live tree untouched`)
+  recordActivity('evolution', `gates FAILED for "${row.title}" — rolled back; live tree restored from backup`)
   try {
     const { reverifyMissionsForProposal } = await import('./mission-service')
     void reverifyMissionsForProposal(id)
@@ -2089,7 +2277,7 @@ export async function applyProposal(id: string): Promise<{ proposal: EvolutionPr
   return {
     proposal: toProposal(rolled),
     message:
-      'Staged gates failed after all repair rounds — the live tree was never touched. The full gate report is attached.',
+      'Gates failed — the live tree is back to its original state (every write was restored from its backup) and the full gate report is attached.',
   }
 }
 
@@ -2247,6 +2435,11 @@ export function ensureEvolutionWatch(): void {
   const tick = async () => {
     g.nextRunAt = Date.now() + intervalMs
     try {
+      // Phase 4-b · R5: the auto evolution-suggest loop is a watcher — it
+      // idles while outbound is off (dormant = 0 outbound). Manual
+      // evolution_suggest tool calls stay available: an owner-initiated
+      // request is not a background watcher.
+      if (!(await outboundWatchersEnabled())) return
       const stats = await getEvolutionStats()
       if (stats.pending >= MAX_PENDING_BEFORE_AUTO) return // let the human catch up first
       // openclaw-inspired first (fresh upstream ideas), otherwise self-idea
@@ -2268,5 +2461,6 @@ export function ensureEvolutionWatch(): void {
     void tick()
   }, intervalMs)
   g.timer.unref?.()
+  lifecycle.registerInterval('evolution-watch', g.timer) // Phase 3-a: SIGTERM clears it
   g.nextRunAt = Date.now() + 3 * 60 * 1000
 }

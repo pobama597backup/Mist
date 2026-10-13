@@ -276,6 +276,8 @@ export interface OjSyncHistoryEntry {
 export interface OjSyncStatus {
   repo: string
   watching: boolean
+  /** Phase 4-b · R5: false when outbound watchers are disabled (dormant). */
+  watchers_enabled: boolean
   head: string | null
   local_head: string | null
   merge_pending: boolean
@@ -312,6 +314,8 @@ export interface OjSyncStatusResponse {
   mark_lv?: MarkLvSyncStatus
   /** w3-notify additive: Clare's teacher notices + pending summary */
   teacher_notices?: TeacherNoticesResponse
+  /** Phase 4-b · R5: the outbound-watchers opt-in state (dormant = 0 outbound) */
+  watchers?: { enabled: boolean; note: string }
 }
 
 export interface OjSyncCheckResponse {
@@ -321,6 +325,8 @@ export interface OjSyncCheckResponse {
   old_head?: string | null
   baseline?: boolean
   busy?: boolean
+  /** Phase 4-b · R5: true when the sweep idled because outbound watchers are disabled. */
+  paused?: boolean
   commits?: { total: number; listed: number; sample: Array<{ sha: string; date: string; title: string }>; truncated: boolean }
   files?: { total: number; list: Array<{ status: string; path: string }>; truncated: boolean }
   tiers?: OjSyncTiers
@@ -344,6 +350,13 @@ export interface OjSyncConfigureResponse {
   config: { interval_min: number; auto_patch: boolean }
 }
 
+/** Phase 4-b · R5 — the outbound-watchers opt-in toggle response. */
+export interface WatchersSetResponse {
+  ok: boolean
+  enabled: boolean
+  message: string
+}
+
 // ---------- mlv-rust-3: Mark-LV (the teacher's assistant) anti-rust watch ----------
 
 export interface MarkLvSyncHistoryEntry {
@@ -360,6 +373,8 @@ export interface MarkLvSyncStatus {
   url: string
   branch: string
   watching: boolean
+  /** Phase 4-b · R5: false when outbound watchers are disabled (dormant). */
+  watchers_enabled: boolean
   status: 'watching' | 'updated' | 'diverged' | 'error'
   head: string | null
   local_head: string | null
@@ -522,6 +537,12 @@ export const ojApi = {
       ojJson<OjSyncConfigureResponse>('/api/mist/oj/sync', {
         method: 'POST',
         body: JSON.stringify({ action: 'configure', ...opts }),
+      }),
+    /** Phase 4-b · R5: flip the outbound-watchers opt-in (dormant default). */
+    setWatchers: (enabled: boolean) =>
+      ojJson<WatchersSetResponse>('/api/mist/oj/sync', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'watchers_set', enabled }),
       }),
   },
 

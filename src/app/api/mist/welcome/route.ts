@@ -1,13 +1,18 @@
 // /api/mist/welcome — the welcome-back briefing (Mark-LV's morning-briefing
 // pattern, our edition).
 //
-// GET  ?tz=... — decide whether she greets on this boot:
-//       · never greeted before → greet
-//       · gap since last seen > 20 min → greet (recap + live news + speech)
-//       · server restarted < 5 min ago and gap > 2 min → "back online" greet
-//       Otherwise: silently touch last-seen (quick refreshes never nag).
+// GET  ?tz=... — STATE ONLY: decide whether a greeting is warranted on this
+//       boot (never greeted / away > 20 min / restarted < 5 min ago + away
+//       > 2 min) → { greet: true|false }. The expensive, side-effecting
+//       compose (LLM lane + memory writes + activity record) lives in POST
+//       — a bare GET can never trigger it (Phase 1 perimeter: reads are
+//       reads). When not warranted we still silently touch last-seen, the
+//       documented gate mechanic ("quick refreshes never nag").
 // POST { action:'seen'  } — the open app pings every 5 min so same-session
 //                         reloads don't re-greet.
+// POST { action:'greet', tz } — the boot compose: re-evaluates the SAME gate
+//                         server-side (never trusts the client's verdict) and
+//                         composes + delivers when warranted.
 // POST { action:'brief', force? } — the "Brief me" button: compose + deliver
 //                         a briefing NOW (no greet gate).
 //
@@ -204,7 +209,14 @@ async function composeBriefing(p: BriefingParts): Promise<{ text: string; provid
   try {
     const m = await import('@/lib/services/llm-service')
     if (typeof m.unified !== 'function') throw new Error('no llm lane')
-    const res = await m.unified({ message: composeInstruction(p), mode: 'consciousness' })
+    // Phase 2-b: the welcome briefing is an unattended heartbeat-flavored
+    // turn — its tool calls arbitrate as owner_heartbeat, queued not asked.
+    const res = await m.unified({
+      message: composeInstruction(p),
+      mode: 'consciousness',
+      origin: 'owner_heartbeat',
+      interactive: false,
+    })
     const text = res.fallback || res.salvaged ? '' : (res.text ?? '').trim().slice(0, 900)
     if (!text) throw new Error('degraded')
     return { text, provider: String(res.provider) }
@@ -243,27 +255,34 @@ async function greetNow(parts: BriefingParts): Promise<NextResponse> {
   })
 }
 
+/** The greet gate — ONE evaluation shared by GET (state) and POST (compose).
+ * Semantics frozen since w4: never greeted / away > 20 min / restart window
+ * (uptime < 5 min AND away > 2 min) → warranted. */
+async function evaluateGate(): Promise<{ warranted: boolean; since: Date }> {
+  const lastSeenRaw = await readMemory(KEY_LAST_SEEN)
+  const lastGreetRaw = await readMemory(KEY_LAST_GREET)
+  const lastSeen = lastSeenRaw ? new Date(lastSeenRaw) : null
+  const lastGreet = lastGreetRaw ? new Date(lastGreetRaw) : null
+  const gap = lastSeen !== null && Number.isFinite(lastSeen.getTime()) ? Date.now() - lastSeen.getTime() : null
+
+  const never = lastGreet === null || !Number.isFinite(lastGreet.getTime())
+  const away = gap !== null && gap > GREET_AFTER_MS
+  const restartCase =
+    process.uptime() < 5 * 60 && gap !== null && gap > RESTART_GREET_AFTER_MS
+
+  const since =
+    lastSeen !== null && Number.isFinite(lastSeen.getTime())
+      ? lastSeen
+      : new Date(Date.now() - 24 * 3600_000)
+  return { warranted: never || away || restartCase, since }
+}
+
 export async function GET(req: NextRequest) {
   try {
-    const tz = req.nextUrl.searchParams.get('tz')
-    const lastSeenRaw = await readMemory(KEY_LAST_SEEN)
-    const lastGreetRaw = await readMemory(KEY_LAST_GREET)
-    const lastSeen = lastSeenRaw ? new Date(lastSeenRaw) : null
-    const lastGreet = lastGreetRaw ? new Date(lastGreetRaw) : null
-    const gap = lastSeen !== null && Number.isFinite(lastSeen.getTime()) ? Date.now() - lastSeen.getTime() : null
-
-    const never = lastGreet === null || !Number.isFinite(lastGreet.getTime())
-    const away = gap !== null && gap > GREET_AFTER_MS
-    const restartCase =
-      process.uptime() < 5 * 60 && gap !== null && gap > RESTART_GREET_AFTER_MS
-
-    if (never || away || restartCase) {
-      const since =
-        lastSeen !== null && Number.isFinite(lastSeen.getTime())
-          ? lastSeen
-          : new Date(Date.now() - 24 * 3600_000)
-      const parts = await buildParts(tz, since)
-      return await greetNow(parts)
+    const gate = await evaluateGate()
+    if (gate.warranted) {
+      // state only — the client POSTs { action: 'greet' } to compose + deliver
+      return NextResponse.json({ greet: true })
     }
     await touchSeen()
     return NextResponse.json({ greet: false })
@@ -282,6 +301,16 @@ export async function POST(req: NextRequest) {
       await touchSeen()
       return NextResponse.json({ ok: true })
     }
+    if (body.action === 'greet') {
+      // the boot compose — the SAME gate, re-evaluated server-side (the
+      // client's GET verdict is never trusted; a cross-site POST cannot
+      // force a greeting it didn't earn)
+      const tz = typeof body.tz === 'string' ? body.tz : null
+      const gate = await evaluateGate()
+      if (!gate.warranted) return NextResponse.json({ greet: false })
+      const parts = await buildParts(tz, gate.since)
+      return await greetNow(parts)
+    }
     if (body.action === 'brief') {
       const tz = typeof body.tz === 'string' ? body.tz : null
       const lastSeenRaw = await readMemory(KEY_LAST_SEEN)
@@ -289,7 +318,7 @@ export async function POST(req: NextRequest) {
       const parts = await buildParts(tz, Number.isFinite(since.getTime()) ? since : null)
       return await greetNow(parts)
     }
-    return NextResponse.json({ error: 'unsupported action — use seen | brief' }, { status: 400 })
+    return NextResponse.json({ error: 'unsupported action — use seen | greet | brief' }, { status: 400 })
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'welcome action failed' },

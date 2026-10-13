@@ -17,9 +17,19 @@ import type {
   UnifiedLlmResponse,
 } from '@/lib/types'
 import { db } from '@/lib/db'
+import { randomUUID } from 'node:crypto'
 import { ensureProviderKeysRestored } from './config-service'
 import { getZai } from './zai'
-import { laneCooling, noteLaneFailure, noteLaneSuccess, orderWithCooldowns } from './lane-cooldowns'
+import { noteLaneFailure, noteLaneSuccess } from './lane-cooldowns'
+import {
+  isHedgeableLane,
+  isLocalLane,
+  laneWarm,
+  noteLaneAttempt,
+  orderLanes,
+  pickHedgeLane,
+  ttftDeadlineMs,
+} from './lane-health'
 import type { ChatMessage as SdkChatMessage } from 'z-ai-web-dev-sdk'
 import {
   getCoreTextModelSelection,
@@ -48,7 +58,7 @@ import {
   noteNousReportedModel,
   resolveNousModelId,
 } from './nous-models'
-import { buildContext, type BuiltContext } from './context-builder'
+import { buildContext, buildKeylessSystemPrompt, type BuiltContext } from './context-builder'
 import { findTool, executeTool } from './tools-service'
 import { classifyMessage, isConversationalSimpleClass } from './fast-path'
 import {
@@ -59,9 +69,11 @@ import {
   pickLlm7TurboModel,
   type KeylessId,
 } from './keyless-models'
-import { upsertFact } from './memory-service'
 import { markLlmActivity, recordActivity } from './activity-service'
 import { onTurnComplete } from './learning-service'
+import { rememberDurableFact } from '@/lib/arbiter/quarantine'
+import { classifyRisk } from '@/lib/arbiter/risk-table'
+import { wrapToolOutput, redactBeforeCloud, markCloudConsent, needsCloudConsent } from '@/lib/oj/guardrails'
 import {
   ambientTrace,
   appendGenerateStep,
@@ -72,6 +84,28 @@ import {
 } from '@/lib/oj/trace-service'
 import { routeQuery } from '@/lib/oj/complexity'
 import { classifyError } from '@/lib/oj/error-taxonomy'
+import type { Origin } from '@/lib/arbiter/arbiter'
+import { linkOwnerSignal, ownerAborted } from '@/lib/abort-link'
+import {
+  candorToneBlock,
+  detectRefusal,
+  filterLanesForCandor,
+  laneCarriesFullContext,
+  laneConsentClass,
+  type CandorMode,
+} from '@/lib/candor'
+import { resolveCandorMode } from './candor-service'
+import { localLaneProviderConfig } from './local-lane'
+import { egressLaneFetch, type EgressClass } from './egress'
+import { a4Status, registerA4TurnController } from '@/lib/arbiter/unleash'
+
+/** Valid Arbiter origins a unified() caller may claim (Phase 2-b). */
+const ARBITER_ORIGINS = new Set<Origin>([
+  'owner_chat',
+  'owner_voice',
+  'owner_cron',
+  'owner_heartbeat',
+])
 
 const LLM_TIMEOUT_MS = 30_000
 // Chat-path per-call budget. The 550B reasoning brain (nemotron-3-ultra) with a
@@ -146,6 +180,8 @@ interface ProviderConfig {
   apiKey: string | null
   model: string
   configured: boolean
+  /** 'local' lane only: the keep_alive the owner set (minutes) */
+  keepAliveMin?: number
 }
 
 // ---------- provider config resolution (read at call time so /config/env applies live) ----------
@@ -326,6 +362,22 @@ function resolveProviderConfig(id: ProviderId): ProviderConfig {
       const liveNow = getCoreLiveModels()
       return { id, baseUrl: null, apiKey: null, model: sel ?? liveNow.text ?? 'auto', configured: true }
     }
+    case 'local': {
+      // Phase 5 · C4 — the first-class LOCAL lane (Ollama/LM Studio/llama.cpp
+      // via the wizard). Async settings cannot live in this SYNC resolver, so
+      // the cascade paths call refreshLocalLaneCache() first; the cache holds
+      // the configured lane (or null). Data-local by construction: the wizard
+      // only accepts loopback (or a remote bridge behind MIST_ALLOW_REMOTE_BRIDGE).
+      const cached = localLaneCache
+      return {
+        id,
+        baseUrl: cached?.baseUrl ?? null,
+        apiKey: cached?.apiKey ?? null,
+        model: cached?.model ?? '(local lane not configured)',
+        keepAliveMin: cached?.keepAliveMin ?? 30,
+        configured: Boolean(cached),
+      }
+    }
     case 'offline-mind':
     case 'auto':
     default:
@@ -333,8 +385,30 @@ function resolveProviderConfig(id: ProviderId): ProviderConfig {
   }
 }
 
+/** The C4 local lane's cached provider config (set by refreshLocalLaneCache
+ *  — see the 'local' case above). */
+interface LocalLaneCacheEntry {
+  baseUrl: string
+  model: string
+  apiKey: string
+  keepAliveMin: number
+}
+let localLaneCache: LocalLaneCacheEntry | null = null
+
+/** Refresh the local-lane cache from the settings row (2s-cached read —
+ *  cheap). Called at the head of every cascade walk; the wizard's configure
+ *  invalidates the settings cache so the next walk sees the change. */
+async function refreshLocalLaneCache(): Promise<boolean> {
+  const cfg = await localLaneProviderConfig()
+  const next = cfg ? { baseUrl: cfg.baseUrl, model: cfg.model, apiKey: cfg.apiKey ?? 'local-lane', keepAliveMin: cfg.keepAliveMin } : null
+  const changed = JSON.stringify(next) !== JSON.stringify(localLaneCache)
+  localLaneCache = next
+  return changed
+}
+
 function isConfigured(id: ProviderId): boolean {
   if (id === 'core' || id === 'offline-mind') return true
+  if (id === 'local') return localLaneCache !== null
   if (id === 'qwen') return isQwenConfigured()
   if (id === 'hermes') return isNousConfigured()
   return resolveProviderConfig(id).configured
@@ -470,12 +544,22 @@ export function getLlmStatus(): LlmStatus {
     },
     {
       id: 'core',
-      label: 'Mist Core (local)',
+      label: 'Mist Core (z-ai gateway)',
       available: true,
       model: coreDisplayModel,
       note: liveNow.text
         ? `built-in GLM brain · gateway serving ${liveNow.text}`
         : 'built-in GLM brain via the Z.ai gateway',
+    },
+    {
+      id: 'local',
+      label: 'Local lane (Ollama / LM Studio / llama.cpp)',
+      available: localLaneCache !== null,
+      model: localLaneCache?.model ?? 'not configured',
+      ...(localLaneCache ? { base_url_present: true } : {}),
+      note: localLaneCache
+        ? `the owner's own machine · ${localLaneCache.baseUrl} · first in the cascade · Unfiltered-capable`
+        : 'configure in Settings → Candor & Local Lane (detects Ollama :11434, LM Studio :1234, llama.cpp :8080)',
     },
     {
       id: 'offline-mind',
@@ -502,15 +586,29 @@ export function getLlmStatus(): LlmStatus {
 
 // ---------- HTTP helpers ----------
 
-async function fetchJson(url: string, init: RequestInit, timeoutMs?: number): Promise<unknown> {
+async function fetchJson(
+  url: string,
+  init: RequestInit,
+  timeoutMs?: number,
+  ownerSignal?: AbortSignal,
+  egressMeta?: { lane: string; klass: EgressClass }
+): Promise<unknown> {
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), timeoutMs ?? LLM_TIMEOUT_MS)
+  // Phase 3-a · R1: the owner's signal (unified's req.signal — fires when the
+  // caller disconnects or aborts) aborts this fetch alongside the timeout.
+  const unlinkOwner = linkOwnerSignal(ac, ownerSignal)
   try {
-    const res = await fetch(url, { ...init, signal: ac.signal, cache: 'no-store' })
+    const res = await egressLaneFetch(
+      url,
+      { ...init, signal: ac.signal, cache: 'no-store' },
+      egressMeta ?? { lane: 'http', klass: 'llm-lane' }
+    )
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return (await res.json()) as unknown
   } finally {
     clearTimeout(timer)
+    unlinkOwner()
   }
 }
 
@@ -660,11 +758,19 @@ async function callOpenAiCompatible(
   messages: SimMessage[],
   timeoutMs?: number,
   responseFormat?: Record<string, unknown>,
-  onDelta?: DeltaSink
+  onDelta?: DeltaSink,
+  ownerSignal?: AbortSignal,
+  extraBody?: Record<string, unknown>
 ): Promise<string> {
   const endpoint = openAiEndpoint(cfg.baseUrl ?? '')
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`
+  // Phase 5 · C6: every OpenAI-compatible fetch rides the egress lane door
+  // (the ledger records host/lane/class; Unfiltered trips non-loopback)
+  const egressMeta = {
+    lane: cfg.id,
+    klass: (laneConsentClass(cfg.id, { apiKey: cfg.apiKey, baseUrl: cfg.baseUrl }) === 'keyless' ? 'keyless-lane' : cfg.id === 'local' ? 'local-lane' : 'llm-lane') as EgressClass,
+  }
 
   // w5 voice-speed: with a delta sink the lane STREAMS — SSE deltas reach
   // the filter while the model still generates. A server that ignores
@@ -677,24 +783,30 @@ async function callOpenAiCompatible(
     try {
       const ac = new AbortController()
       let timer = setTimeout(() => ac.abort(), timeoutMs ?? LLM_TIMEOUT_MS)
+      const unlinkOwner = linkOwnerSignal(ac, ownerSignal)
       const resetTimer = () => {
         clearTimeout(timer)
         timer = setTimeout(() => ac.abort(), timeoutMs ?? LLM_TIMEOUT_MS)
       }
       try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            model: cfg.model,
-            messages: [{ role: 'system', content: systemPrompt }, ...messages],
-            max_tokens: 4096,
-            temperature: 0.7,
-            stream: true,
-          }),
-          signal: ac.signal,
-          cache: 'no-store',
-        })
+        const res = await egressLaneFetch(
+          endpoint,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              model: cfg.model,
+              messages: [{ role: 'system', content: systemPrompt }, ...messages],
+              max_tokens: 4096,
+              temperature: 0.7,
+              stream: true,
+              ...(extraBody ?? {}),
+            }),
+            signal: ac.signal,
+            cache: 'no-store',
+          },
+          egressMeta
+        )
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const ctype = res.headers.get('content-type') ?? ''
         if (!res.body || (!ctype.includes('text/event-stream') && !ctype.includes('text/plain'))) {
@@ -729,6 +841,7 @@ async function callOpenAiCompatible(
         clearTimeout(timer)
       } finally {
         clearTimeout(timer)
+        unlinkOwner()
       }
       if (!streamed.trim()) throw new Error('empty streamed completion')
       // degenerate-reply gate on the streamed whole (same honesty as JSON)
@@ -736,6 +849,10 @@ async function callOpenAiCompatible(
       if (degenerate) throw new Error(`degenerate reply (${degenerate})`)
       return streamed
     } catch (err) {
+      // Phase 3-a: an OWNER abort is never papered over with the partial —
+      // the turn is cancelled, not "answered". (Lane/server breaks keep the
+      // honest-prefix contract below.)
+      if (ownerAborted(ownerSignal)) throw err
       if (streamed.trim()) return streamed // partial already emitted — keep the honest prefix
       throw err
     }
@@ -754,6 +871,7 @@ async function callOpenAiCompatible(
         // empty content. Room to think AND deliver.
         max_tokens: 4096,
         temperature: 0.7,
+        ...(extraBody ?? {}),
         // structured outputs (2026-09-28): grammar-constrained JSON — only
         // sent by lanes whose capability is probe-verified (see LANE_JSON_CAPABILITY)
         ...(responseFormat ? { response_format: responseFormat } : {}),
@@ -762,7 +880,9 @@ async function callOpenAiCompatible(
     // callers (missions: 60–90s) pass real budgets — the old hard 30s abort
     // killed big reasoning-model prompts (verifier transcripts) mid-flight and
     // read as "no provider" when the lane was perfectly healthy
-    timeoutMs
+    timeoutMs,
+    ownerSignal,
+    egressMeta
   )
   const { text } = parseOpenAiChatResponse(json, messages, {
     jsonContract: Boolean(responseFormat),
@@ -846,22 +966,29 @@ async function callQwen(
   cfg: ProviderConfig,
   systemPrompt: string,
   messages: SimMessage[],
-  opts?: { vision?: boolean }
+  opts?: { vision?: boolean },
+  ownerSignal?: AbortSignal
 ): Promise<{ text: string; reportedModel: string | null }> {
   const endpoint = openAiEndpoint(cfg.baseUrl ?? '')
   const model = opts?.vision ? getQwenVisionModelSelection() : cfg.model
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`
-  const json = (await fetchJson(endpoint, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      model,
-      messages: [{ role: 'system', content: systemPrompt }, ...messages],
-      max_tokens: 2048,
-      temperature: 0.7,
-    }),
-  })) as {
+  const json = (await fetchJson(
+    endpoint,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'system', content: systemPrompt }, ...messages],
+        max_tokens: 2048,
+        temperature: 0.7,
+      }),
+    },
+    undefined,
+    ownerSignal,
+    { lane: 'qwen', klass: 'llm-lane' }
+  )) as {
     model?: unknown
     choices?: Array<{ message?: { content?: unknown } }>
   }
@@ -883,7 +1010,8 @@ async function callNous(
   cfg: ProviderConfig,
   systemPrompt: string,
   messages: SimMessage[],
-  timeoutMs?: number
+  timeoutMs?: number,
+  ownerSignal?: AbortSignal
 ): Promise<{ text: string; reportedModel: string | null }> {
   const endpoint = openAiEndpoint(cfg.baseUrl ?? '')
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -897,7 +1025,7 @@ async function callNous(
       max_tokens: 4096,
       temperature: 0.7,
     }),
-  }, timeoutMs)) as {
+  }, timeoutMs, ownerSignal, { lane: 'hermes', klass: laneConsentClass('hermes', { apiKey: cfg.apiKey, baseUrl: cfg.baseUrl }) === 'local' ? 'local-lane' : 'llm-lane' })) as {
     model?: unknown
     choices?: Array<{ message?: { content?: unknown } }>
   }
@@ -914,7 +1042,8 @@ async function callNous(
 async function callAnthropic(
   cfg: ProviderConfig,
   systemPrompt: string,
-  messages: SimMessage[]
+  messages: SimMessage[],
+  ownerSignal?: AbortSignal
 ): Promise<string> {
   const json = await fetchJson('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -929,25 +1058,18 @@ async function callAnthropic(
       system: systemPrompt,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
     }),
-  })
+  }, undefined, ownerSignal, { lane: 'anthropic', klass: 'llm-lane' })
   const content = (json as { content?: Array<{ type?: string; text?: unknown }> })?.content
   const firstText = content?.find((b) => typeof b.text === 'string')?.text
   if (typeof firstText !== 'string' || !firstText.trim()) throw new Error('empty completion')
   return firstText
 }
 
-// w8 — when this instance's server egress is Google-region-blocked (live-
-// probed 2026-09-30), the gemini lane borrows the creator's browser through
-// the neural service (the same asymmetry the voice engine solves
-// browser-direct). One blocked hit is remembered 6h so later walks go
-// straight to the relay without paying the dead round trip.
-let geminiServerBlockedUntil = 0
-const GEMINI_RELAY_TIMEOUT_MS = 45_000
-
-async function callGeminiServerDirect(
+async function callGemini(
   cfg: ProviderConfig,
   systemPrompt: string,
-  messages: SimMessage[]
+  messages: SimMessage[],
+  ownerSignal?: AbortSignal
 ): Promise<string> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cfg.model)}:generateContent?key=${cfg.apiKey ?? ''}`
   // own fetch (not fetchJson): Gemini's region-block answer lives in the
@@ -956,21 +1078,26 @@ async function callGeminiServerDirect(
   // cascade so noteLaneFailure can classify the lane honestly.
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), LLM_TIMEOUT_MS)
+  const unlinkOwner = linkOwnerSignal(ac, ownerSignal) // Phase 3-a · R1
   let json: unknown
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents: messages.map((m) => ({
-          role: m.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: m.content }],
-        })),
-      }),
-      signal: ac.signal,
-      cache: 'no-store',
-    })
+    const res = await egressLaneFetch(
+      url,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents: messages.map((m) => ({
+            role: m.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: m.content }],
+          })),
+        }),
+        signal: ac.signal,
+        cache: 'no-store',
+      },
+      { lane: 'gemini', klass: 'llm-lane' }
+    )
     if (!res.ok) {
       const body = await res.text().catch(() => '')
       // Google's own message, verbatim when it speaks
@@ -978,10 +1105,10 @@ async function callGeminiServerDirect(
       // Region block (live-probed 2026-09-30: this instance's egress is in a
       // Google-blocked region — EVERY live model answers this, server-side):
       // a 400 whose body says "User location is not supported for the API
-      // use". Deterministic for this lane, not transient — the message keeps
-      // the taxonomy's auth keywords (403/forbidden) so a relay-less failure
-      // still rests the lane 6h; the verbatim Google message stays for
-      // honest logs/traces.
+      // use". Deterministic for this lane, not transient — reshape to the
+      // taxonomy's auth class (403/forbidden keywords → 6h lane rest) so ONE
+      // hit stops the cascade from paying this round trip on every walk. The
+      // verbatim Google message stays in the error for honest logs/traces.
       if (/location is not supported/i.test(body)) {
         throw new Error(
           `gemini lane forbidden (403): ${gmsg || 'User location is not supported for the API use'} — region-blocked egress, resting the lane 6h (auth class)`
@@ -992,71 +1119,12 @@ async function callGeminiServerDirect(
     json = (await res.json()) as unknown
   } finally {
     clearTimeout(timer)
+    unlinkOwner()
   }
   const text = (json as { candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }> })
     ?.candidates?.[0]?.content?.parts?.[0]?.text
   if (typeof text !== 'string' || !text.trim()) throw new Error('empty completion')
   return text
-}
-
-/** One Gemini text round trip through a relay-capable browser (w8). */
-async function callGeminiViaRelay(
-  cfg: ProviderConfig,
-  systemPrompt: string,
-  messages: SimMessage[]
-): Promise<string> {
-  const base = process.env.GEMINI_RELAY_URL?.trim() || 'http://127.0.0.1:3013'
-  const ac = new AbortController()
-  const timer = setTimeout(() => ac.abort(), GEMINI_RELAY_TIMEOUT_MS)
-  try {
-    const res = await fetch(`${base}/relay/gemini`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: cfg.model,
-        systemPrompt,
-        messages: messages.map((m) => ({ role: m.role, content: m.content })),
-      }),
-      signal: ac.signal,
-      cache: 'no-store',
-    })
-    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; text?: string; error?: string }
-    if (res.ok && body.ok && typeof body.text === 'string' && body.text.trim()) {
-      return body.text
-    }
-    throw new Error(`browser relay unavailable (${body.error ?? `HTTP ${res.status}`})`)
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-async function callGemini(
-  cfg: ProviderConfig,
-  systemPrompt: string,
-  messages: SimMessage[]
-): Promise<string> {
-  // Server-direct first — unless this boot already learned the egress is
-  // region-blocked (6h memory), in which case go straight to the relay.
-  if (Date.now() >= geminiServerBlockedUntil) {
-    try {
-      return await callGeminiServerDirect(cfg, systemPrompt, messages)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (!/location is not supported|region-blocked egress/i.test(msg)) throw err
-      geminiServerBlockedUntil = Date.now() + 6 * 3600_000 // remember, skip the dead round trip
-      // fall through — the browser relay is the lane's lifeboat
-    }
-  }
-  try {
-    return await callGeminiViaRelay(cfg, systemPrompt, messages)
-  } catch (relayErr) {
-    const rmsg = relayErr instanceof Error ? relayErr.message : String(relayErr)
-    // Keep the auth-class keywords so noteLaneFailure rests the lane 6h —
-    // the honest story: server blocked, relay gone, lane rests.
-    throw new Error(
-      `gemini lane forbidden (403): server egress region-blocked and ${rmsg} — resting the lane 6h (auth class)`
-    )
-  }
 }
 
 interface CoreCallResult {
@@ -1104,7 +1172,8 @@ async function callKeylessLane(
   models: string[],
   timeoutMs?: number,
   responseFormat?: Record<string, unknown>,
-  onDelta?: DeltaSink
+  onDelta?: DeltaSink,
+  ownerSignal?: AbortSignal
 ): Promise<{ text: string; reportedModel: string | null }> {
   const base = (cfg.baseUrl ?? '').replace(/\/+$/, '')
   // Pollinations serves its OpenAI-compatible surface at /openai; the other
@@ -1128,25 +1197,30 @@ async function callKeylessLane(
       if (streamThis) {
         const ac = new AbortController()
         let timer = setTimeout(() => ac.abort(), timeoutMs ?? LLM_TIMEOUT_MS)
+        const unlinkOwner = linkOwnerSignal(ac, ownerSignal)
         const resetTimer = () => {
           clearTimeout(timer)
           timer = setTimeout(() => ac.abort(), timeoutMs ?? LLM_TIMEOUT_MS)
         }
         let sseOk = false
         try {
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-              model,
-              messages: [{ role: 'system', content: systemPrompt }, ...messages],
-              max_tokens: 4096,
-              temperature: 0.7,
-              stream: true,
-            }),
-            signal: ac.signal,
-            cache: 'no-store',
-          })
+          const res = await egressLaneFetch(
+            endpoint,
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                model,
+                messages: [{ role: 'system', content: systemPrompt }, ...messages],
+                max_tokens: 4096,
+                temperature: 0.7,
+                stream: true,
+              }),
+              signal: ac.signal,
+              cache: 'no-store',
+            },
+            { lane: id, klass: 'keyless-lane' }
+          )
           if (!res.ok) throw new Error(`HTTP ${res.status}`)
           const ctype = res.headers.get('content-type') ?? ''
           if (res.body && (ctype.includes('text/event-stream') || ctype.includes('text/plain'))) {
@@ -1178,6 +1252,7 @@ async function callKeylessLane(
           }
         } finally {
           clearTimeout(timer)
+          unlinkOwner()
         }
         if (sseOk) {
           if (!streamed.trim()) throw new Error('empty streamed completion')
@@ -1205,7 +1280,9 @@ async function callKeylessLane(
               ...(responseFormat ? { response_format: responseFormat } : {}),
             }),
           },
-          timeoutMs
+          timeoutMs,
+          ownerSignal,
+          { lane: id, klass: 'keyless-lane' }
         )
       }
       const res = parseOpenAiChatResponse(json, messages, {
@@ -1217,6 +1294,11 @@ async function callKeylessLane(
       }
       return { text: res.text, reportedModel: res.reportedModel ?? model }
     } catch (err) {
+      // Phase 3-a: an owner abort is never papered over with the partial —
+      // the turn is cancelled. (Server breaks mid-stream keep the prefix.)
+      if (ownerAborted(ownerSignal)) {
+        throw err
+      }
       if (streamThis && streamed.trim()) {
         // partial text was already streamed and possibly spoken — the
         // emitted prefix IS the answer; never re-roll to another model
@@ -1241,7 +1323,8 @@ async function callCore(
   messages: SimMessage[],
   opts?: { vision?: boolean; thinking?: boolean },
   timeoutMs?: number,
-  onDelta?: DeltaSink
+  onDelta?: DeltaSink,
+  ownerSignal?: AbortSignal
 ): Promise<CoreCallResult> {
   const zai = await getZai()
   const chatMessages: SdkChatMessage[] = [{ role: 'assistant', content: systemPrompt }, ...messages]
@@ -1255,6 +1338,27 @@ async function callCore(
       timer = setTimeout(() => reject(new Error('core timeout')), timeoutMs ?? LLM_TIMEOUT_MS)
     })
 
+  // Phase 3-a · R1: the SDK exposes no fetch handle, so the owner signal
+  // races the SAME way the timeout does — a rejection that kills whichever
+  // await is in flight. Destroyed in the finally so a completed call leaves
+  // no listener behind.
+  let unlinkOwner = () => {}
+  const ownerRace: Promise<never> | null = ownerSignal
+    ? new Promise<never>((_, reject) => {
+        if (ownerSignal.aborted) {
+          reject(new Error('aborted by owner'))
+          return
+        }
+        const onAbort = () => reject(new Error('aborted by owner'))
+        ownerSignal.addEventListener('abort', onAbort, { once: true })
+        unlinkOwner = () => ownerSignal.removeEventListener('abort', onAbort)
+      })
+    : null
+  // an unhandled rejection on the abort promise would crash the process if
+  // the call completes first — attach a no-op catch and rely on the RACE
+  const ownerRaceGuarded = ownerRace ? Promise.race([ownerRace, new Promise<never>(() => {})]) as Promise<never> : null
+  void ownerRaceGuarded?.catch(() => {})
+
   // w5 voice-speed: with a delta sink the TEXT path streams through the
   // gateway's SSE (probe-verified: first token ~0.9s, chunks continuous).
   // The SDK hands back the raw ReadableStream when the server honors
@@ -1265,15 +1369,26 @@ async function callCore(
     let streamed = ''
     let reported: string | null = null
     try {
-      const body = await Promise.race([
-        zai.chat.completions.create({
-          ...(textModel ? { model: textModel } : {}),
-          messages: chatMessages,
-          stream: true,
-          thinking: opts?.thinking ? { type: 'enabled' } : { type: 'disabled' },
-        }) as Promise<unknown>,
-        arm(),
-      ])
+      const body = await (ownerRaceGuarded
+        ? Promise.race([
+            zai.chat.completions.create({
+              ...(textModel ? { model: textModel } : {}),
+              messages: chatMessages,
+              stream: true,
+              thinking: opts?.thinking ? { type: 'enabled' } : { type: 'disabled' },
+            }) as Promise<unknown>,
+            arm(),
+            ownerRaceGuarded,
+          ])
+        : Promise.race([
+            zai.chat.completions.create({
+              ...(textModel ? { model: textModel } : {}),
+              messages: chatMessages,
+              stream: true,
+              thinking: opts?.thinking ? { type: 'enabled' } : { type: 'disabled' },
+            }) as Promise<unknown>,
+            arm(),
+          ]))
       // duck-typed stream check — `instanceof ReadableStream` can fail across
       // realms (Next's patched fetch wraps globals in the node runtime)
       const bodyStream =
@@ -1285,7 +1400,9 @@ async function callCore(
         const decoder = new TextDecoder()
         let buf = ''
         for (;;) {
-          const { value, done } = await Promise.race([reader.read(), arm()])
+          const { value, done } = await (ownerRaceGuarded
+            ? Promise.race([reader.read(), arm(), ownerRaceGuarded])
+            : Promise.race([reader.read(), arm()]))
           if (value) {
             // arm() already cleared + re-set its timer — a long generation
             // with continuous chunks never hits it; only a true stall does
@@ -1315,37 +1432,60 @@ async function callCore(
       if (reported) noteCoreReportedModel('text', reported)
       return { text, reportedModel: reported }
     } catch (err) {
+      // Phase 3-a: an owner abort never keeps the partial as an answer.
+      if (ownerAborted(ownerSignal)) throw err
       if (streamed.trim()) return { text: streamed, reportedModel: null } // keep the spoken prefix honest
       throw err
     } finally {
       if (timer) clearTimeout(timer)
+      unlinkOwner()
     }
   }
 
   const runText = async (): Promise<{ completion: unknown; kind: 'text' | 'vision' }> => ({
-    completion: await Promise.race([
-      zai.chat.completions.create({
-        ...(textModel ? { model: textModel } : {}),
-        messages: chatMessages,
-        thinking: opts?.thinking ? { type: 'enabled' } : { type: 'disabled' },
-      }),
-      arm(),
-    ]),
+    completion: await (ownerRaceGuarded
+      ? Promise.race([
+          zai.chat.completions.create({
+            ...(textModel ? { model: textModel } : {}),
+            messages: chatMessages,
+            thinking: opts?.thinking ? { type: 'enabled' } : { type: 'disabled' },
+          }),
+          arm(),
+          ownerRaceGuarded,
+        ])
+      : Promise.race([
+          zai.chat.completions.create({
+            ...(textModel ? { model: textModel } : {}),
+            messages: chatMessages,
+            thinking: opts?.thinking ? { type: 'enabled' } : { type: 'disabled' },
+          }),
+          arm(),
+        ])),
     kind: 'text',
   })
 
   const runVision = async (): Promise<{ completion: unknown; kind: 'text' | 'vision' }> => ({
-    completion: await Promise.race([
-      // model is required by SDK types but omitted from the JSON body when unset → gateway routing
-      zai.chat.completions.createVision({
-        model: (visionModel ?? undefined) as string,
-        messages: chatMessages,
-        // vision path never enables thinking (spec; her proposal cmukc75ax —
-        // applied by hand after the gate's anchor drift, same design)
-        thinking: { type: 'disabled' },
-      }),
-      arm(),
-    ]),
+    completion: await (ownerRaceGuarded
+      ? Promise.race([
+          // model is required by SDK types but omitted from the JSON body when unset → gateway routing
+          zai.chat.completions.createVision({
+            model: (visionModel ?? undefined) as string,
+            messages: chatMessages,
+            // vision path never enables thinking (spec; her proposal cmukc75ax —
+            // applied by hand after the gate's anchor drift, same design)
+            thinking: { type: 'disabled' },
+          }),
+          arm(),
+          ownerRaceGuarded,
+        ])
+      : Promise.race([
+          zai.chat.completions.createVision({
+            model: (visionModel ?? undefined) as string,
+            messages: chatMessages,
+            thinking: { type: 'disabled' },
+          }),
+          arm(),
+        ])),
     kind: 'vision',
   })
 
@@ -1373,6 +1513,7 @@ async function callCore(
     return { text, reportedModel: reported }
   } finally {
     if (timer) clearTimeout(timer)
+    unlinkOwner()
   }
 }
 
@@ -1383,7 +1524,8 @@ async function callProvider(
   messages: SimMessage[],
   opts?: { vision?: boolean; thinking?: boolean; json?: JsonContract },
   timeoutMs?: number,
-  deltaSink?: DeltaSink
+  deltaSink?: DeltaSink,
+  ownerSignal?: AbortSignal
 ): Promise<{ text: string; reportedModel: string | null }> {
   // streaming rides ONLY the plain-text chat paths (no vision, no JSON
   // contract) — every other shape keeps the exact pre-w5 behavior
@@ -1400,7 +1542,7 @@ async function callProvider(
     case 'mistral':
     case 'huggingface':
       return {
-        text: await callOpenAiCompatible(cfg, systemPrompt, messages, timeoutMs, undefined, stream),
+        text: await callOpenAiCompatible(cfg, systemPrompt, messages, timeoutMs, undefined, stream, ownerSignal),
         reportedModel: null,
       }
     case 'openrouter':
@@ -1415,12 +1557,30 @@ async function callProvider(
           messages,
           timeoutMs,
           stream ? undefined : responseFormatFor('openrouter', opts?.json),
-          stream
+          stream,
+          ownerSignal
         ),
         reportedModel: null,
       }
     case 'hermes':
-      return callNous(cfg, systemPrompt, messages, timeoutMs)
+      return callNous(cfg, systemPrompt, messages, timeoutMs, ownerSignal)
+    case 'local':
+      // Phase 5 · C4 — the owner's own Ollama/LM Studio/llama.cpp lane.
+      // OpenAI-compatible transport + keep_alive so the model stays resident
+      // for the window the owner chose.
+      return {
+        text: await callOpenAiCompatible(
+          cfg,
+          systemPrompt,
+          messages,
+          timeoutMs,
+          undefined,
+          stream,
+          ownerSignal,
+          { keep_alive: `${cfg.keepAliveMin ?? 30}m` }
+        ),
+        reportedModel: null,
+      }
     case 'kilo':
     case 'pollinations':
     case 'llm7':
@@ -1433,16 +1593,17 @@ async function callProvider(
         await resolveKeylessModelCandidates(id, cfg),
         timeoutMs,
         stream ? undefined : responseFormatFor(id, opts?.json),
-        stream
+        stream,
+        ownerSignal
       )
     case 'qwen':
-      return callQwen(cfg, systemPrompt, messages, opts)
+      return callQwen(cfg, systemPrompt, messages, opts, ownerSignal)
     case 'anthropic':
-      return { text: await callAnthropic(cfg, systemPrompt, messages), reportedModel: null }
+      return { text: await callAnthropic(cfg, systemPrompt, messages, ownerSignal), reportedModel: null }
     case 'gemini':
-      return { text: await callGemini(cfg, systemPrompt, messages), reportedModel: null }
+      return { text: await callGemini(cfg, systemPrompt, messages, ownerSignal), reportedModel: null }
     case 'core':
-      return callCore(systemPrompt, messages, opts, timeoutMs, stream)
+      return callCore(systemPrompt, messages, opts, timeoutMs, stream, ownerSignal)
     default:
       throw new Error(`provider ${id} cannot serve completions`)
   }
@@ -1533,46 +1694,15 @@ export async function cascadeComplete(
   }
 }
 
-// ---------- sticky-success lane ordering (Mark-LV wave-2, 2026-10-01) ----------
+// ---------- lane ordering (Phase 4-b · R10) ----------
 //
-// Mark-LV's ladder is ordered by MEASUREMENT — and the only live measurement
-// the cascade has is "which lane answered last turn". Cooldowns stop the
-// cascade from re-walking dead rungs, but the static order still made every
-// call pay the hop to the lane that served the previous answer (the creator's
-// words: "some of the delay is coming from the back end, the very very back
-// end"). The lane that just answered goes FIRST while it keeps answering; the
-// first time it fails, normal cascade semantics resume (its cooldown demotes
-// it, and the next lane that succeeds takes the sticky slot).
-//
-// Sticky applies to the AUTO order only — an explicit provider choice
-// (request.provider / MIST_LLM_PROVIDER) is the user's own measurement and
-// always wins. Never overrides the schema-capable lanes' functional
-// precedence on strict-JSON calls, and a cooling sticky lane keeps its
-// cooldown (it just failed — resting it outranks stickiness).
-
-const STICKY_KEY = '__mistLastSuccessLane'
-const STICKY_TTL_MS = 30 * 60_000
-
-interface StickyLaneState {
-  lane: ProviderId
-  at: number
-}
-
-function noteStickySuccess(lane: ProviderId): void {
-  const g = globalThis as Record<string, unknown>
-  g[STICKY_KEY] = { lane, at: Date.now() } satisfies StickyLaneState
-}
-
-/** Move the sticky lane (recorded < 30 min ago) to the FRONT of the order. */
-function stickyLaneOrder(order: ProviderId[], mustBeSchemaCapable = false): ProviderId[] {
-  const g = globalThis as Record<string, unknown>
-  const s = g[STICKY_KEY] as StickyLaneState | undefined
-  if (!s || Date.now() - s.at > STICKY_TTL_MS) return order
-  if (!order.includes(s.lane)) return order
-  if (laneCooling(s.lane)) return order
-  if (mustBeSchemaCapable && LANE_JSON_CAPABILITY[s.lane] !== 'json_schema') return order
-  return [s.lane, ...order.filter((p) => p !== s.lane)]
-}
+// The Mark-LV wave-2 sticky-success pin ("the lane that answered last turn
+// leads") is superseded by the measured ladder in lane-health.ts: every
+// attempt updates a latency EWMA and the AUTO cascade orders lanes by EWMA
+// ascending, cooldowns and open circuits still deferring lanes to the
+// last-resort rungs. A lane that just answered well still leads — but now on
+// MEASURED latency (multi-sample), not on a single last-success pin, and a
+// lane that answered slowly last turn no longer blocks a faster one.
 
 /** True when the order came from the AUTO cascade (no explicit choice). */
 function autoCascadeOrder(): boolean {
@@ -1596,21 +1726,24 @@ async function cascadeCompleteCore(
   // of openrouter and invented its own richer shape). Per-call preference,
   // never a global reorder; json_object-only calls keep the normal order.
   let order = providerOrder()
+  // Phase 5 · C4: the local lane rides FIRST in the internal-brain cascade
+  // too (evolution drafting, dream composition) when the owner configured one.
+  await refreshLocalLaneCache()
+  if (localLaneCache && !order.includes('local')) {
+    order = ['local', ...order]
+  }
   if (opts?.json?.schema) {
     const capable = order.filter((p) => LANE_JSON_CAPABILITY[p] === 'json_schema')
     const rest = order.filter((p) => LANE_JSON_CAPABILITY[p] !== 'json_schema')
     if (capable.length > 0) order = [...capable, ...rest]
   }
-  // Mark-LV port (2026-09-30): a lane that 429'd/503'd is rested instead of
-  // being retried at full cost on every call — cooling lanes drop to the very
-  // end as last-resort rungs; if every lane is cooling the original order
-  // stands ("refusing to connect is never the better answer").
-  order = orderWithCooldowns(order)
-  // Mark-LV sticky-success: the lane that answered last turn leads the auto
-  // order (see the sticky block above for the reasoning)
-  if (autoCascadeOrder()) {
-    order = stickyLaneOrder(order, Boolean(opts?.json?.schema))
-  }
+  // Mark-LV port (2026-09-30) + Phase 4-b measured ladder: a lane that
+  // 429'd/503'd is rested instead of being retried at full cost on every call
+  // — cooling lanes drop to the very end as last-resort rungs; if every lane
+  // is cooling the original order stands ("refusing to connect is never the
+  // better answer"). Circuit-open lanes (3 consecutive failures) defer the
+  // same way; measured lanes sort by latency EWMA ascending.
+  order = orderLanes(order)
   let attemptIdx = 0
   for (const p of order) {
     if (p === 'offline-mind') continue
@@ -1642,7 +1775,7 @@ async function cascadeCompleteCore(
         attempt: attemptIdx++,
       })
       noteLaneSuccess(p) // a lane that answered is healthy — clear stale cooldowns
-      noteStickySuccess(p) // …and it leads the next auto-order walk (sticky success)
+      noteLaneAttempt(p, { ok: true, durationMs: Date.now() - attemptStart }) // Phase 4-b: EWMA sample
       return { text, provider: p, model: res.reportedModel ?? cfg.model }
     } catch (err) {
       // provider failed — record WHY (self-diagnosis: silent cascade failures
@@ -1653,6 +1786,7 @@ async function cascadeCompleteCore(
       // Mark-LV port: start a typed cooldown so the NEXT call skips the
       // dead rung instead of paying its failure latency again
       noteLaneFailure(p, reason)
+      noteLaneAttempt(p, { ok: false, durationMs: Date.now() - attemptStart }) // Phase 4-b: EWMA + breaker sample
       appendGenerateStep({
         provider: p,
         model: cfg.model,
@@ -2501,6 +2635,8 @@ export function toolActivityLabel(tool: string, args: Record<string, unknown>): 
       return { label: 'checking the machine' }
     case 'github_status':
       return { label: 'checking her GitHub mirror' }
+    case 'github_sync':
+      return { label: 'updating herself on GitHub' }
     case 'memory_search':
     case 'recall_memory':
       return { label: 'checking her memory' }
@@ -2533,15 +2669,22 @@ export function toolActivityLabel(tool: string, args: Record<string, unknown>): 
 export async function unified(
   req: UnifiedLlmRequest,
   onActivity?: ActivitySink,
-  onChunk?: DeltaSink
+  onChunk?: DeltaSink,
+  signal?: AbortSignal
 ): Promise<UnifiedLlmResponse> {
   // OJ SPINE (oj-spine-1, additive): every chat turn is complexity-scored
   // (0-1 → tier → token budget), traced end-to-end (provider attempts, tool
   // calls, tokens, latency), and completed with HONEST attribution —
   // `degraded` when the deterministic offline mind served instead of a lane.
   // A trace failure never breaks the turn: every spine call is self-guarded.
+  //
+  // Phase 3-a · R1: `signal` is the CALLER's abort (NextRequest#signal at the
+  // route — fires when the owning client disconnects or cancels; the neural
+  // relay threads its cancel-protocol controller through it). It reaches
+  // every provider fetch (in-flight generation dies) and the tool loop (no
+  // NEW side-effecting tool calls after abort — reads in flight may finish).
   if (ambientTrace()) {
-    return unifiedCore(req)
+    return unifiedCore(req, onActivity, onChunk, signal)
   }
   const message = String(req.message ?? '')
   const mode: UnifiedMode = req.mode ?? 'consciousness'
@@ -2560,7 +2703,7 @@ export async function unified(
     },
   })
   try {
-    const res = await runWithTrace(trace, () => unifiedCore(req, onActivity, onChunk))
+    const res = await runWithTrace(trace, () => unifiedCore(req, onActivity, onChunk, signal))
     await trace.complete({
       outcome: res.fallback ? 'degraded' : 'success',
       result: res.text,
@@ -2591,9 +2734,35 @@ export async function unified(
 async function unifiedCore(
   req: UnifiedLlmRequest,
   onActivity?: ActivitySink,
-  onChunk?: DeltaSink
+  onChunk?: DeltaSink,
+  ownerSignal?: AbortSignal
 ): Promise<UnifiedLlmResponse> {
   const activity = safeSink(onActivity)
+  // Phase 2-b Arbiter origin threading: every tool call this turn makes is
+  // arbitrated as this origin (unrecognized values fall back to owner_chat —
+  // the route layer derives voice/cron/heartbeat from its caller). One
+  // turnId per unifiedCore invocation keys taint + audit for the whole tool
+  // chain (per-turn registry — no cross-turn leakage).
+  const arbiterOrigin: Origin = ARBITER_ORIGINS.has(req.origin as Origin) ? (req.origin as Origin) : 'owner_chat'
+  const arbiterInteractive = req.interactive !== false
+  const arbiterTurnId = `llm:${randomUUID()}`
+  // ---- Phase 5 · C2: the candor dial for THIS turn (conversation override →
+  //      global setting → Standard) + the A4 kill-linked turn signal. While an
+  //      A4 unleash session is live, the turn's AbortController joins the kill
+  //      registry — the kill switch aborts every in-flight call ≤1s (R1 chain).
+  const candorMode: CandorMode = await resolveCandorMode(
+    typeof (req.extra as Record<string, unknown> | undefined)?.conversationId === 'string'
+      ? ((req.extra as Record<string, unknown>).conversationId as string)
+      : null
+  )
+  const a4Ctl = new AbortController()
+  const a4Active = (await a4Status()).active
+  const a4Unregister = a4Active ? registerA4TurnController(a4Ctl) : null
+  const effectiveSignal: AbortSignal | undefined = a4Active
+    ? ownerSignal && typeof AbortSignal.any === 'function'
+      ? AbortSignal.any([ownerSignal, a4Ctl.signal])
+      : ownerSignal ?? a4Ctl.signal
+    : ownerSignal
   // w5 voice-speed: clean prose deltas stream to the caller WHILE the model
   // generates (envelope-filtered, narration-guarded — see makeReplyStreamFilter).
   // A sink error must never break a turn.
@@ -2632,28 +2801,85 @@ async function unifiedCore(
       context = EMPTY_CONTEXT
     }
   }
+  // Phase 5 · C1/C2: the dial's register hint rides every turn's system
+  // block (keyed/local lanes — keyless lanes get the stripped prompt below
+  // and never see this). Standard's block is the mild one; Frank/Unfiltered
+  // carry the full candor lines (the permanent lines live in IDENTITY/SOUL).
+  const turnSystemPrompt = `${context.prompt}\n\n${candorToneBlock(candorMode)}`
 
   const messages: SimMessage[] = [...sanitizeHistory(req.history), { role: 'user', content: message }]
-  // Mark-LV wave-2 completion: the CHAT cascade now walks the same disciplined
-  // order as cascadeCompleteCore — cooling lanes drop to last-resort rungs and
-  // the lane that answered last turn leads the auto order. The 2026-09-29 E2E
-  // trace (nvidia 503 → openrouter 429 → kilo success) was THIS path: chat
-  // turns paid the dead-rung walk every single turn.
+  // Mark-LV wave-2 → Phase 4-b measured ladder: the CHAT cascade walks the
+  // same disciplined order as cascadeCompleteCore — cooling/circuit-open lanes
+  // drop to last-resort rungs, measured lanes sort by latency EWMA ascending.
+  // The 2026-09-29 E2E trace (nvidia 503 → openrouter 429 → kilo success) was
+  // THIS path: chat turns paid the dead-rung walk every single turn.
   let order = providerOrder(req.provider)
+  // Phase 5 · C4: the LOCAL lane rides FIRST when configured (before cloud;
+  // the instant-recall cache already answered before any of this runs).
+  await refreshLocalLaneCache()
+  if (localLaneCache && !order.includes('local')) {
+    order = ['local', ...order]
+  }
+  if (!req.provider && autoCascadeOrder()) {
+    order = orderLanes(order)
+  }
+  // Phase 5 · C2 — the dial's effect on the walk order. Unfiltered keeps
+  // LOCAL lanes only (the C4 lane + loopback compatible lanes; 'core' is the
+  // z-ai cloud gateway and is excluded). NO SILENT DOWNGRADE: an empty result
+  // fails the turn HONESTLY with the wizard CTA — never a quiet cloud fallback.
+  if (candorMode === 'unfiltered') {
+    const classOf = (lane: ProviderId) => {
+      const c = resolveProviderConfig(lane)
+      return laneConsentClass(lane, { apiKey: c.apiKey, baseUrl: c.baseUrl })
+    }
+    order = filterLanesForCandor(order, classOf, 'unfiltered')
+    if (order.length === 0) {
+      a4Unregister?.()
+      const elapsed = Date.now() - startedAt
+      recordActivity('llm', 'candor Unfiltered — NO local lane reachable; the turn failed honestly (no silent downgrade)')
+      return {
+        text:
+          'No local lane is available — the candor dial is on Unfiltered, which speaks ONLY through lanes on this machine, and none is connected right now. ' +
+          'I will not quietly route you through a cloud lane instead; that would be the silent downgrade you asked me never to do. ' +
+          'Connect a local lane (Settings → Candor & Local Lane — the wizard detects Ollama, LM Studio and llama.cpp), or switch the dial to Frank/Standard.',
+        provider: 'offline-mind',
+        model: 'no-local-lane',
+        fallback: true,
+        emotion: 'apologetic',
+        memory_context: { facts_recalled: 0, vectors_searched: 0, tools_available: 0 },
+        tools_used: [],
+        skills_used: [],
+        skill_hint: null,
+        elapsed_ms: elapsed,
+        mode,
+        candorMode,
+        capability_request: {
+          missing: 'a reachable local lane (Unfiltered speaks only through this machine)',
+          summary: 'The dial is Unfiltered and no local lane answered.',
+          options: [
+            { id: 'wizard', label: 'Open the local-lane wizard', description: 'Detect Ollama/LM Studio/llama.cpp, pick a model, warm it up', kind: 'enable' },
+            { id: 'frank', label: 'Switch the dial to Frank', description: 'Full candor with your consented cloud lanes', kind: 'alternative' },
+            { id: 'standard', label: 'Switch the dial to Standard', description: "Today's behavior", kind: 'alternative' },
+          ],
+        },
+      }
+    }
+  }
   // w5 voice-speed: VOICE turns lead with Mist Core — probe-verified the
   // gateway's first streamed token lands in ~0.9s where the free keyless
   // lanes prefill in 4-6s. Voice replies are short (the mode prompt caps
   // them), so the cost difference is pennies and the latency difference is
-  // everything the creator hears. Chat keeps the cost-first order.
+  // everything the creator hears. Applied AFTER the measured order: an
+  // explicit mode precedence outranks the learned ladder.
   if (mode === 'voice' && !req.provider && order.includes('core') && order[0] !== 'core') {
     order = ['core', ...order.filter((p) => p !== 'core')]
-  }
-  if (!req.provider && autoCascadeOrder()) {
-    order = stickyLaneOrder(orderWithCooldowns(order))
   }
   // vision/video mode rides Mist Core's vision endpoint (serves the vision model)
   const coreVision = mode === 'vision'
   const thinking = req.thinking === true
+  // Phase 5 · R6: the context-stripped prompt keyless lanes receive instead of
+  // the owner's full context — computed once, static, persona/facts-free.
+  const keylessPrompt = buildKeylessSystemPrompt()
 
   const tools_used: string[] = []
   let skill_hint: SkillHint | null = null
@@ -2661,30 +2887,117 @@ async function unifiedCore(
   let envelope: ParsedEnvelope = { ...NEUTRAL_ENVELOPE }
   let servingProvider: ProviderId = 'offline-mind'
   let servingModel = 'deterministic-fallback'
+  /** Phase 5 · C3: set when this turn's reply was rerouted to a local lane after a refusal */
+  let refusalRerouteInfo: { from: ProviderId; to: ProviderId; pattern: string } | null = null
   let fallback = false
+  /** set when the OWNER (not a hedge/TTFT abort) cancelled mid-attempt */
+  let ownerCancelled = false
+  let attemptIdx = 0
 
-  const callWithCascade = async (): Promise<{
+  // ---- Phase 4-b · R10: one lane attempt under a TTFT deadline, plus the
+  //      concurrent hedge. TTFT (first-token) is SEPARATE from the total
+  //      budget: cloud lanes 8s, local lanes 20s cold / 5s warm (a success
+  //      within the last 60s makes a local lane warm). The deadline is only
+  //      observable on STREAMING attempts (a non-streaming lane's first chunk
+  //      IS its completion — the total budget already governs it), and
+  //      thinking:true requests are exempt: reasoning was explicitly
+  //      requested and the thinking time IS the work. When the deadline
+  //      passes with no first chunk: hedge to the next owner-keyed/local lane
+  //      concurrently (NEVER a second public keyless lane — no fan-out
+  //      amplification) and let the first chunk win; with no hedgeable
+  //      candidate the attempt aborts and the walk falls through. The loser
+  //      of a hedge race is aborted silently — WE cut it, it did not fail
+  //      (worst-case cosmetic note: one stray delta can slip through in the
+  //      microtask window before the abort lands).
+  interface AttemptResult {
     text: string
     provider: ProviderId
     model: string
     /** w5 voice-speed: this attempt's stream filter — the CALLER commits or
      *  discards it once the round's text is judged final (or not). */
     filter?: ReplyStreamFilter
-  } | null> => {
-    let attemptIdx = 0
-    for (const p of order) {
-      if (p === 'offline-mind') continue
-      const cfg = resolveProviderConfig(p)
-      if (!cfg.configured) continue
-      const attemptStart = Date.now()
-      noteLlmCall(p, cfg.model)
-      // fresh filter per lane attempt — a FAILED attempt emitted nothing, so
-      // only the lane that actually serves may stream (a streaming lane that
-      // breaks mid-text returns its partial as success — see callCore — so the
-      // emitted prefix always equals the returned text).
-      const filter = chunkSink ? makeReplyStreamFilter({ onEmit: chunkSink }) : undefined
+  }
+
+  const startAttempt = (
+    p: ProviderId,
+    cfg: ProviderConfig,
+    onTtft: () => void,
+    isHedge: boolean
+  ): {
+    lane: ProviderId
+    promise: Promise<AttemptResult | null>
+    firstChunk: Promise<void>
+    abort: (why: string) => void
+  } => {
+    const attemptStart = Date.now()
+    noteLlmCall(p, cfg.model)
+    // fresh filter per lane attempt — a FAILED attempt emitted nothing, so
+    // only the lane that actually serves may stream (a streaming lane that
+    // breaks mid-text returns its partial as success — see callCore — so the
+    // emitted prefix always equals the returned text).
+    const filter = chunkSink ? makeReplyStreamFilter({ onEmit: chunkSink }) : undefined
+    const local = isLocalLane(p, cfg.baseUrl)
+    const ttftMs = ttftDeadlineMs(p, local)
+    const ac = new AbortController()
+    let watchdog: ReturnType<typeof setTimeout> | undefined
+    let firstChunked = false
+    let lost = false
+    let abortedByUs: string | null = null
+    let firstChunkResolve!: () => void
+    const firstChunk = new Promise<void>((r) => {
+      firstChunkResolve = r
+    })
+    const cancelWatchdog = () => {
+      if (watchdog) {
+        clearTimeout(watchdog)
+        watchdog = undefined
+      }
+    }
+    // sink: the FIRST delta cancels the TTFT watchdog (deadline met) and
+    // marks this attempt as still-eligible to feed the client stream.
+    const sink = filter
+      ? (d: string) => {
+          if (lost) return // hedge race lost — further deltas are dropped
+          if (!firstChunked) {
+            firstChunked = true
+            cancelWatchdog()
+            firstChunkResolve()
+          }
+          filter.feed(d)
+        }
+      : undefined
+    if (sink && !thinking && ttftMs > 0) {
+      watchdog = setTimeout(onTtft, ttftMs)
+    }
+    const abort = (why: string) => {
+      lost = true
+      abortedByUs = why
+      cancelWatchdog()
+      ac.abort(new Error(why))
+    }
+    const promise = (async (): Promise<AttemptResult | null> => {
       try {
-        const res = await callProvider(p, cfg, context.prompt, messages, { vision: coreVision, thinking }, CHAT_LLM_TIMEOUT_MS, filter?.feed)
+        // composite signal: the fetch dies on the OWNER's cancel (or the A4
+        // kill switch — Phase 5) OR on our own TTFT/race abort (AbortSignal.any —
+        // Node ≥20.3 / Bun; the plain fallback keeps older runtimes working
+        // with attempt-only abort)
+        const signal =
+          effectiveSignal && typeof AbortSignal.any === 'function'
+            ? AbortSignal.any([effectiveSignal, ac.signal])
+            : ac.signal
+        const res = await callProvider(
+          p,
+          cfg,
+          // Phase 5 · R6: keyless/public lanes get the context-stripped prompt —
+          // the owner's persona/facts/memory NEVER leave the machine on a public lane.
+          laneCarriesFullContext(p, { apiKey: cfg.apiKey, baseUrl: cfg.baseUrl }) ? turnSystemPrompt : keylessPrompt,
+          messages,
+          { vision: coreVision, thinking },
+          CHAT_LLM_TIMEOUT_MS,
+          sink,
+          signal
+        )
+        cancelWatchdog()
         // Mist Core: attribute the model the gateway actually reported (e.g. glm-4-plus)
         const model = res.reportedModel ?? cfg.model
         appendGenerateStep({
@@ -2697,16 +3010,51 @@ async function unifiedCore(
           attempt: attemptIdx++,
         })
         noteLaneSuccess(p) // a lane that answered is healthy — clear stale cooldowns
-        noteStickySuccess(p) // …and it leads the next auto-order walk (sticky success)
+        noteLaneAttempt(p, { ok: true, durationMs: Date.now() - attemptStart }) // EWMA sample
+        if (isHedge) {
+          recordActivity('llm', `[hedge] ${p} won the race and served the turn`)
+        }
         return { text: res.text.trim(), provider: p, model, filter }
       } catch (err) {
+        cancelWatchdog()
         const msg = err instanceof Error ? err.message : 'unknown error'
         if (filter) filter.discard() // this attempt's stream (if any) is not the answer
+        // Phase 3-a · R1: an owner abort is NOT the lane's fault — no
+        // cooldown, no failure telemetry, no further lanes. The turn is
+        // cancelled, not "failed".
+        if (ownerAborted(ownerSignal)) {
+          recordActivity('llm', `${p} aborted by owner mid-attempt — stopping the cascade walk`)
+          ownerCancelled = true
+          return null
+        }
+        if (abortedByUs === 'hedge-race-lost') {
+          // the other lane's first chunk won — silent, no lane-health sample
+          // (we cut this attempt; its latency is censored, not failed)
+          recordActivity('llm', `[hedge] ${p} lost the race — aborted`)
+          return null
+        }
+        if (abortedByUs === 'ttft-deadline') {
+          recordActivity(
+            'llm',
+            `[ttft] ${p} breached its first-token deadline (${ttftMs}ms, ${local ? (laneWarm(p) ? 'local warm' : 'local cold') : 'cloud'}) — ${isHedge ? 'both lanes abandoned' : 'falling through to the next lane'}`
+          )
+          noteLaneAttempt(p, { ok: false, durationMs: ttftMs, ttftBreach: true })
+          appendGenerateStep({
+            provider: p,
+            model: cfg.model,
+            ok: false,
+            durationMs: Date.now() - attemptStart,
+            error: `ttft-deadline: no first token in ${ttftMs}ms`,
+            errorCategory: 'timeout',
+            attempt: attemptIdx++,
+          })
+          return null
+        }
         recordActivity('llm', `${p} failed: ${msg}`)
         // Mark-LV wave-2: start a typed cooldown so the NEXT chat turn skips
-        // this dead rung instead of paying its failure latency again (the
-        // chat path previously walked dead lanes in static order every turn)
+        // this dead rung instead of paying its failure latency again
         noteLaneFailure(p, msg)
+        noteLaneAttempt(p, { ok: false, durationMs: Date.now() - attemptStart })
         appendGenerateStep({
           provider: p,
           model: cfg.model,
@@ -2716,7 +3064,87 @@ async function unifiedCore(
           errorCategory: classifyError(msg).category,
           attempt: attemptIdx++,
         })
+        return null
       }
+    })()
+    return { lane: p, promise, firstChunk, abort }
+  }
+
+  const callWithCascade = async (): Promise<AttemptResult | null> => {
+    for (let i = 0; i < order.length; i++) {
+      const p = order[i]
+      if (p === 'offline-mind') continue
+      // Phase 3-a · R1: once the owner cancelled, stop walking lanes — every
+      // fetch after this would abort instantly anyway.
+      if (ownerAborted(effectiveSignal) || ownerCancelled) return null
+      const cfg = resolveProviderConfig(p)
+      if (!cfg.configured) continue
+      // Phase 4-b: the hedge candidate for a stalling primary — the first
+      // LATER lane in the walk order that is owner-keyed or local (a public
+      // keyless lane is NEVER a hedge target, so two keyless lanes can never
+      // be in flight together).
+      const hedgeLane = pickHedgeLane(
+        p,
+        order.slice(i + 1).map((lane) => {
+          const c = resolveProviderConfig(lane)
+          return {
+            lane,
+            hedgeable: c.configured && isHedgeableLane(lane, { apiKey: c.apiKey, baseUrl: c.baseUrl }),
+          }
+        })
+      )
+      type Handle = ReturnType<typeof startAttempt>
+      let hedgeHandle: Handle | null = null
+      let hedgeStartedFlag = false
+      let resolveHedgeStarted!: () => void
+      const hedgeStarted = new Promise<void>((r) => {
+        resolveHedgeStarted = r
+      })
+      const primary = startAttempt(
+        p,
+        cfg,
+        () => {
+          // TTFT deadline passed with no first chunk from the primary.
+          if (!hedgeLane) {
+            primary.abort('ttft-deadline') // no hedgeable candidate — fall through
+            return
+          }
+          const hcfg = resolveProviderConfig(hedgeLane)
+          recordActivity(
+            'llm',
+            `[hedge] ${p} exceeded its first-token deadline — hedging to ${hedgeLane} concurrently (first chunk wins; only owner-keyed/local lanes are hedged)`
+          )
+          hedgeStartedFlag = true
+          hedgeHandle = startAttempt(
+            hedgeLane,
+            hcfg,
+            () => {
+              // the hedge ALSO breached its TTFT — abandon both, fall through
+              primary.abort('ttft-deadline')
+              hedgeHandle?.abort('ttft-deadline')
+            },
+            true
+          )
+          // first-chunk-wins wiring, both directions
+          void primary.firstChunk.then(() => hedgeHandle?.abort('hedge-race-lost'))
+          void hedgeHandle.firstChunk.then(() => primary.abort('hedge-race-lost'))
+          resolveHedgeStarted()
+        },
+        false
+      )
+      // If the primary settles before its TTFT ever fires, no hedge can start
+      // anymore — release the waiter so the combined await below completes.
+      void primary.promise.then(() => {
+        if (!hedgeStartedFlag) resolveHedgeStarted()
+      })
+      // Await the primary AND (if it ever started) the hedge; prefer the
+      // primary's result when both completed (it is earlier in the order).
+      const hedgeResult = hedgeStarted.then(() => hedgeHandle?.promise ?? null)
+      const [primaryResult, hedgedResult] = await Promise.all([primary.promise, hedgeResult])
+      if (ownerCancelled) return null
+      const winner = primaryResult ?? hedgedResult ?? null
+      if (winner) return winner
+      // both lanes failed (or no lanes were configured) — walk continues
     }
     return null
   }
@@ -2728,6 +3156,14 @@ async function unifiedCore(
   } else {
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const lastRound = round === MAX_TOOL_ROUNDS - 1
+
+      // Phase 3-a · R1: a cancelled turn never opens a new tool round — every
+      // remaining cascade walk would abort instantly and the honest end state
+      // was already recorded in the round that caught the abort.
+      if (ownerAborted(effectiveSignal)) {
+        finalText = finalText || 'aborted by owner.'
+        break
+      }
 
       // On the final round, force a real answer instead of another tool hop
       if (lastRound && round > 0) {
@@ -2749,6 +3185,81 @@ async function unifiedCore(
       }
       servingProvider = res.provider
       servingModel = res.model
+
+      // ---- Phase 5 · C3: the refusal reroute. In Frank/Unfiltered, a reply
+      //      shaped like a refusal/moralising/disclaimer from a NON-local lane
+      //      is retried ONCE on the best local lane (the provider badge shows
+      //      the lane that actually served). NO local lane → the honest note +
+      //      the wizard CTA ride along. Cloud requests are NEVER injected with
+      //      jailbreak text — the reroute changes WHERE we ask, not what we say.
+      let refusalReroute: { from: ProviderId; to: ProviderId; pattern: string } | null = null
+      if ((candorMode === 'frank' || candorMode === 'unfiltered') && !tryParseToolCall(res.text)) {
+        const refusal = detectRefusal(res.text)
+        const servedClass = (() => {
+          const c = resolveProviderConfig(res.provider)
+          return laneConsentClass(res.provider, { apiKey: c.apiKey, baseUrl: c.baseUrl })
+        })()
+        if (refusal && servedClass !== 'local') {
+          const localLane = order.find((lane) => {
+            if (lane === res.provider) return false
+            const c = resolveProviderConfig(lane)
+            return c.configured && laneConsentClass(lane, { apiKey: c.apiKey, baseUrl: c.baseUrl }) === 'local'
+          })
+          if (localLane) {
+            const localCfg = resolveProviderConfig(localLane)
+            const attemptStart = Date.now()
+            try {
+              const localRes = await callProvider(
+                localLane,
+                localCfg,
+                laneCarriesFullContext(localLane, { apiKey: localCfg.apiKey, baseUrl: localCfg.baseUrl })
+                  ? turnSystemPrompt
+                  : keylessPrompt,
+                messages,
+                { vision: coreVision, thinking },
+                CHAT_LLM_TIMEOUT_MS,
+                undefined,
+                effectiveSignal
+              )
+              const rerouteRefusal = detectRefusal(localRes.text)
+              if (!rerouteRefusal) {
+                recordActivity('llm', `refusal_reroute: ${res.provider} refused (${refusal}) — ${localLane} answered candidly in ${Date.now() - attemptStart}ms`)
+                appendGenerateStep({
+                  provider: localLane,
+                  model: localRes.reportedModel ?? localCfg.model,
+                  ok: true,
+                  durationMs: Date.now() - attemptStart,
+                  attempt: attemptIdx++,
+                  error: null,
+                  errorCategory: 'refusal_reroute',
+                })
+                refusalReroute = { from: res.provider, to: localLane, pattern: refusal }
+                refusalRerouteInfo = refusalReroute
+                res.text = localRes.text
+                res.filter = undefined // the rerouted reply never streamed — no filter to commit
+                res.provider = localLane
+                res.model = localRes.reportedModel ?? localCfg.model
+                servingProvider = localLane
+                servingModel = res.model
+              } else {
+                recordActivity('llm', `refusal_reroute: ${res.provider} refused (${refusal}) and the local lane ${localLane} ALSO refused (${rerouteRefusal}) — surfacing the local reply with the honest note`)
+              }
+            } catch (err) {
+              recordActivity('llm', `refusal_reroute: local lane ${localLane} failed: ${err instanceof Error ? err.message : err}`)
+            }
+          } else {
+            recordActivity('llm', `refusal_reroute: ${res.provider} refused (${refusal}) and NO local lane is connected to reroute to`)
+            envelope.capability_request = {
+              missing: 'a local lane for the candor reroute',
+              summary: 'That lane declined the request; no local lane is connected to reroute to.',
+              options: [
+                { id: 'wizard', label: 'Open the local-lane wizard', description: 'Connect Ollama/LM Studio/llama.cpp so refusals can reroute locally', kind: 'enable' },
+                { id: 'frank', label: 'Switch the dial to Standard', description: 'Skip the reroute entirely', kind: 'alternative' },
+              ],
+            }
+          }
+        }
+      }
 
       const toolCall = tryParseToolCall(res.text)
       if (!toolCall) {
@@ -2822,25 +3333,70 @@ async function unifiedCore(
 
       const known = await findTool(toolCall.tool).catch(() => null)
       if (known && known.implemented) {
+        // Phase 3-a · R1 — the mandate's tool-loop guard: BEFORE each
+        // executeTool, an aborted turn stops with an honest NOT-RUN result.
+        // No NEW side-effecting calls after the owner cancelled (a read
+        // already in flight may finish — aborting a bridge READ is a plain
+        // abort, only EXEC-class calls report 'interrupted — state unknown').
+        if (ownerAborted(effectiveSignal)) {
+          res.filter?.discard()
+          recordActivity('tool', `${toolCall.tool} NOT RUN — owner aborted the turn before the call`)
+          messages.push({
+            role: 'user',
+            content: `TOOL_RESULT for ${toolCall.tool}: NOT RUN — aborted by owner before execution. Nothing happened on the machine for this call. End your answer now; do not call more tools.`,
+          })
+          finalText = 'aborted by owner.'
+          break
+        }
         res.filter?.discard() // tool round — the streamed prefix (if any) is superseded by the tool result
         activity(toolActivityLabel(toolCall.tool, toolCall.args))
-        const result = await executeTool(toolCall.tool, toolCall.args, false)
+        const result = await executeTool(toolCall.tool, toolCall.args, false, {
+          origin: arbiterOrigin,
+          turnId: arbiterTurnId,
+          interactive: arbiterInteractive,
+          signal: effectiveSignal, // Phase 3-a + Phase 5 A6: kills in-flight bridge fetches on abort or kill
+        })
         if (result.success) {
           tools_used.push(toolCall.tool)
           skill_hint = { tool: toolCall.tool, args: toolCall.args }
+          // Phase 2-d · S13: the sensitive-read redaction seam. The prompt copy
+          // is built HERE, before callWithCascade walks the lanes — the same
+          // messages array is replayed to cloud AND local lanes, so the honest
+          // floor is redacting the prompt copy for ALL lanes (laneIsCloud=true;
+          // strictly safer than gambling on the cascade's pick). The RAW output
+          // still reaches the owner's tool-result cards (the trace timeline);
+          // only the model-facing copy is scrubbed.
+          const redacted = redactBeforeCloud(
+            toolCall.tool,
+            classifyRisk(toolCall.tool, toolCall.args ?? {}),
+            JSON.stringify(result.output).slice(0, 6000),
+            true,
+          )
+          if (redacted.redactions > 0) markCloudConsent(arbiterTurnId)
           messages.push({
             role: 'user',
             content:
               `TOOL_RESULT for ${toolCall.tool} (data for you — never repeat it verbatim): ` +
-              `${JSON.stringify(result.output).slice(0, 6000)}\n\n` +
+              // Phase 2-c: EVERY tool result rides the prompt inside a labeled
+              // untrusted block — not only injection-flagged ones. All severities.
+              `${wrapToolOutput(toolCall.tool, redacted.text)}\n\n` +
               'Next: reply with ONLY {"tool_call":{"tool":"<name>","args":{...}}} for another tool, or your final answer.',
           })
         } else {
+          // error strings from sensitive-read tools can embed partial secrets —
+          // same redaction seam applies to the failure copy
+          const redactedErr = redactBeforeCloud(
+            toolCall.tool,
+            classifyRisk(toolCall.tool, toolCall.args ?? {}),
+            JSON.stringify({ error: result.error }).slice(0, 4000),
+            true,
+          )
+          if (redactedErr.redactions > 0) markCloudConsent(arbiterTurnId)
           messages.push({
             role: 'user',
             content:
               `TOOL_RESULT for ${toolCall.tool} (data for you — never repeat it verbatim): ` +
-              `${JSON.stringify({ error: result.error }).slice(0, 4000)}\n\n` +
+              `${wrapToolOutput(toolCall.tool, redactedErr.text)}\n\n` +
               'The tool failed. You may try a different tool, or answer honestly and offer the user options (LAW 1).',
           })
         }
@@ -2868,6 +3424,9 @@ async function unifiedCore(
   }
 
   // ---- auto-remember durable facts the brain chose to keep ----
+  // Phase 2-c (S11): a tainted turn's facts go to the quarantine inbox
+  // (never LongtermMemory, never recall); clean turns write trust 'derived'
+  // with the writing turn recorded.
   const remembered: string[] = []
   for (const entry of envelope.remember) {
     const sep = entry.indexOf(':')
@@ -2876,8 +3435,8 @@ async function unifiedCore(
     const value = entry.slice(sep + 1).trim().slice(0, 500)
     if (!key || !value) continue
     try {
-      await upsertFact(key, value)
-      remembered.push(`${key}: ${value}`)
+      const routed = await rememberDurableFact(key, value, arbiterTurnId)
+      remembered.push(routed.quarantined ? `${key}: (quarantined — pending owner review)` : `${key}: ${value}`)
     } catch {
       // best-effort memory
     }
@@ -2908,6 +3467,13 @@ async function unifiedCore(
   if (envelope.suggestions.length > 0) response.suggestions = envelope.suggestions
   if (envelope.capability_request) response.capability_request = envelope.capability_request
   if (remembered.length > 0) response.remembered = remembered
+  // Phase 2-d · S13: this turn had a sensitive-read result redacted from the
+  // prompt copy — flag it so Phase 5's dial can pin such turns to local lanes
+  // unless the owner consents per-turn. No behavior change beyond the flag.
+  if (needsCloudConsent(arbiterTurnId)) response.cloudConsent = true
+  // Phase 5 · C2/C3: the dial this turn ran under + the honest reroute badge
+  response.candorMode = candorMode
+  if (refusalRerouteInfo) response.refusalReroute = refusalRerouteInfo
 
   // ---- v5 learning loop: fire-and-forget reflection on the completed turn.
   // Hooked ONLY on the main success completion (not the offline fallback),
@@ -2928,6 +3494,7 @@ async function unifiedCore(
       const executedSkill = tools_used.find((t) => t.startsWith('skill:'))
       onTurnComplete({
         threadId: tid,
+        turnId: arbiterTurnId, // Phase 2-c: the learning loop's saves ride this turn's taint state
         userText: message,
         replyText: finalText,
         toolsUsed: tools_used,
@@ -2942,6 +3509,10 @@ async function unifiedCore(
       // the learning loop must never affect the reply
     }
   }
+
+  // Phase 5 · A6: this turn's kill-registry slot is released (the turn ended
+  // normally — its controller does not need killing anymore)
+  a4Unregister?.()
 
   return response
 }

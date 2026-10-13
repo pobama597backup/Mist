@@ -15,6 +15,7 @@ import { getZai } from './zai'
 import { db } from '@/lib/db'
 import { recordActivity } from './activity-service'
 import { topCannedLinesForWarm } from './fast-path'
+import { retentionCaps } from './retention-service'
 import {
   edgeSynthesize,
   edgeSilenceMp3,
@@ -315,8 +316,15 @@ async function lookupSpoken(hash: string): Promise<Buffer | null> {
   }
 }
 
-/** Best-effort store + trim guard (>400 entries → drop the oldest ~100).
- *  Never awaited on the speech path — failures are swallowed. */
+/** The SpokenCache cap — ONE source of truth shared with the retention loop. */
+function spokenCacheCap(): number {
+  return retentionCaps().spokenCache
+}
+
+/** Best-effort store + trim guard (over the retention cap → drop the oldest
+ *  ~100). The cap lives in retention-service (MIST_RETENTION_SPOKENCACHE,
+ *  default 400) so the slow 10-min loop and this in-line guard agree on ONE
+ *  number (Phase 4-b · P5 alignment). Never awaited on the speech path. */
 async function storeSpoken(hash: string, buffer: Buffer): Promise<void> {
   try {
     // Prisma's Bytes field wants Uint8Array<ArrayBuffer>; Buffer is
@@ -327,11 +335,14 @@ async function storeSpoken(hash: string, buffer: Buffer): Promise<void> {
       update: { bytes, size: bytes.length },
       create: { hash, bytes, size: bytes.length },
     })
+    const cap = spokenCacheCap()
     const count = await db.spokenCache.count()
-    if (count > 400) {
+    if (count > cap) {
+      const overflow = count - cap
+      const batch = Math.max(100, overflow) // historical ~100 batch, sized up when deep over cap
       const oldest = await db.spokenCache.findMany({
         orderBy: { createdAt: 'asc' },
-        take: 100,
+        take: batch,
         select: { id: true },
       })
       if (oldest.length > 0) {

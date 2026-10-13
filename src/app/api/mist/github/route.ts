@@ -1,17 +1,16 @@
-// M.I.S.T. GitHub mirror API (w10) — read-only by design.
-// GET  → public mirror status through GitHub's unauthenticated API.
-//        No token is read, stored, or accepted anywhere.
-// POST → 403 forever: write access was removed by the creator's order (w10).
-//        The repository is his alone — updates are pushed by him, never by Mist.
-import { NextResponse } from 'next/server'
-import { githubStatus } from '@/lib/services/github-service'
+// M.I.S.T. GitHub self-management API (w8).
+// GET  → status (token present/valid, repo, last commits, export state)
+// POST → { action: 'save-token' | 'clear-token' | 'sync', token?, message? }
+import { NextRequest, NextResponse } from 'next/server'
+import { githubClearToken, githubSaveToken, githubStatus, githubSync } from '@/lib/services/github-service'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
 export async function GET() {
   try {
-    return NextResponse.json(await githubStatus())
+    const status = await githubStatus()
+    return NextResponse.json(status)
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'github status failed' },
@@ -20,12 +19,30 @@ export async function GET() {
   }
 }
 
-export async function POST() {
-  return NextResponse.json(
-    {
-      error:
-        'write access removed by design (w10) — the repository belongs to her creator; Mist holds no token and cannot push. Updates are published by the creator.',
-    },
-    { status: 403 }
-  )
+export async function POST(req: NextRequest) {
+  try {
+    const body = (await req.json().catch(() => null)) as {
+      action?: unknown
+      token?: unknown
+      message?: unknown
+    } | null
+    const action = typeof body?.action === 'string' ? body.action : ''
+    if (action === 'save-token') {
+      const res = await githubSaveToken(body?.token)
+      return NextResponse.json(res, { status: res.ok ? 200 : 400 })
+    }
+    if (action === 'clear-token') {
+      return NextResponse.json(await githubClearToken())
+    }
+    if (action === 'sync') {
+      const res = await githubSync(body?.message)
+      return NextResponse.json(res, { status: res.ok ? 200 : 400 })
+    }
+    return NextResponse.json({ error: 'unknown action' }, { status: 400 })
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'github action failed' },
+      { status: 500 }
+    )
+  }
 }

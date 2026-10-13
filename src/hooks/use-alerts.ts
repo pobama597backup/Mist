@@ -1,4 +1,9 @@
-// Heartbeat alert delivery — polls /api/mist/alerts every 30s (+ on focus).
+// Heartbeat alert delivery — Phase 4-a · R11: the 30s poll interval is
+// GONE; the shared events channel drives delivery (a change on the `alerts`
+// topic → one poll; the poll itself still delivers, persists and marks
+// delivered server-side exactly as before). The boot + focus polls stay as
+// fallbacks for when the channel is paused (hidden tab) or down.
+//
 // Pending alerts (⏰ due reminders, 📦 upstream releases, ⚠️ machine health)
 // are:
 //   1. toasted (always visible, even outside the chat view),
@@ -22,9 +27,9 @@ import { mistSpeech, stripMarkdownForSpeech } from '@/lib/speech'
 import { alertSeverity, wantsOsNotification, wantsSpokenWarning } from '@/lib/alert-priority'
 import { showOsNotification } from '@/lib/os-notifications'
 import { publishNotificationFeed } from '@/lib/notification-feed'
+import { subscribeMistEvents } from '@/hooks/use-events'
+import { shouldRefetch } from '@/lib/events-protocol'
 import type { AlertInfo, ChatMessage } from '@/lib/types'
-
-const POLL_INTERVAL_MS = 30_000
 
 function alertToMessage(alert: AlertInfo): string {
   const lines = [alert.title]
@@ -43,7 +48,12 @@ export function useMistAlerts(): void {
   const activeThreadId = useMistStore((s) => s.threads.activeId)
   const bumpThreadsRefresh = useMistStore((s) => s.bumpThreadsRefresh)
   const activeRef = useRef<string | null>(activeThreadId)
-  activeRef.current = activeThreadId
+  // written in an effect (never during render) per react-hooks/refs — the only
+  // reader is resolveThread inside the poll/deliver callbacks, all of which
+  // run post-commit, so the post-render mirror is behaviorally identical
+  useEffect(() => {
+    activeRef.current = activeThreadId
+  })
   const inFlight = useRef(false)
 
   useEffect(() => {
@@ -134,14 +144,20 @@ export function useMistAlerts(): void {
       }
     }
 
-    // first poll slightly delayed so the app shell settles
+    // first poll slightly delayed so the app shell settles (the events
+    // channel usually delivers the alerts snapshot sooner — inFlight dedups)
     const boot = setTimeout(poll, 4000)
-    const id = setInterval(poll, POLL_INTERVAL_MS)
+    // Phase 4-a · R11: the events channel replaces the 30s interval — a
+    // change on the `alerts` topic (or the post-reconnect snapshot) polls
+    // ONCE. Heartbeats never trigger a poll (shouldRefetch).
+    const unsubEvents = subscribeMistEvents((ev) => {
+      if (shouldRefetch(ev, 'alerts')) void poll()
+    })
     window.addEventListener('focus', poll)
     return () => {
       alive = false
+      unsubEvents()
       clearTimeout(boot)
-      clearInterval(id)
       window.removeEventListener('focus', poll)
     }
   }, [bumpThreadsRefresh])

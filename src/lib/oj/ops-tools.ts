@@ -15,6 +15,7 @@ import {
   type CronJobSpec,
 } from '@/lib/services/scheduler-service'
 import { listSkills } from '@/lib/services/skills-service'
+import { currentArbiterTurn } from '@/lib/arbiter/turn-context'
 
 function param(
   name: string,
@@ -141,7 +142,13 @@ export const OPS_TOOLS: BaseToolDef[] = [
         name: description.slice(0, 80),
         prompt: description,
       }
-      const res = await createCronJob(spec, 'mist')
+      const res = await createCronJob(spec, 'mist', {
+        // Phase 2-c: tool-path write — provenance only (the Arbiter arbitrated
+        // this call; a tainted call already asked, the owner approved the args)
+        turnId: currentArbiterTurn()?.turnId ?? null,
+        source: 'tool:schedule_task',
+        trust: 'derived',
+      })
       if (!res.ok) throw new Error(res.error ?? 'failed to schedule the task')
       return {
         ok: true,

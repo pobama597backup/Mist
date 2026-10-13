@@ -76,7 +76,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: true, emitted: false, reason: 'bridge-offline' })
   }
 
-  const res = await bridgeExec('signal_emit', args)
+  const res = await bridgeExec('signal_emit', args, { origin: 'owner_voice' }) // Phase 2-b: the orb's own signal lane
   if (!res.ok) {
     return NextResponse.json({ ok: true, emitted: false, reason: res.error ?? 'emit-failed' })
   }

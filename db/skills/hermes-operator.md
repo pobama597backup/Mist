@@ -3,7 +3,7 @@ name: hermes-operator
 description: Control and monitor the creator's business via their local Hermes agent (bridge) — delegate tasks, read its memory, export skills both ways, schedule business cron, keep chatting while long jobs run
 trigger: When the creator asks anything about the business, Hermes, their local agent setup, or asks to run/monitor/schedule business tasks
 created: 2026-10-01T07:30:00.000Z
-tool_chain: ["hermes_status","hermes_delegate","hermes_memory","hermes_skills","hermes_cron","start_async","web_search"]
+tool_chain: ["hermes_status","hermes_delegate","hermes_memory","hermes_skills","hermes_cron","web_search"]
 ---
 
 # hermes-operator

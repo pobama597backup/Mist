@@ -539,6 +539,9 @@ export function UpstreamTab() {
   const [autoPatchInput, setAutoPatchInput] = useState(false)
   const [savingConfig, setSavingConfig] = useState(false)
 
+  // Phase 4-b · R5 — the outbound-watchers opt-in (dormant default = zero outbound)
+  const [watchersBusy, setWatchersBusy] = useState(false)
+
   // w3-notify — the teacher's notices (Clare writes, the creator answers)
   const [deciding, setDeciding] = useState<{ id: string; decision: 'wanted' | 'dismissed' } | null>(null)
   const [noticeHistoryOpen, setNoticeHistoryOpen] = useState(false)
@@ -561,7 +564,9 @@ export function UpstreamTab() {
   }, [])
 
   useEffect(() => {
-    refresh()
+    // deferred to a macrotask — refresh() setStates synchronously (setLoading)
+    const id = window.setTimeout(() => void refresh(), 0)
+    return () => window.clearTimeout(id)
   }, [refresh])
 
   const runCheck = async () => {
@@ -661,6 +666,27 @@ export function UpstreamTab() {
     }
   }
 
+  // Phase 4-b · R5 — flip the outbound opt-in. OFF is the honest default:
+  // the watchlist (npmjs/github), oj-sync + mark-lv git watchers, the
+  // OpenClaw digest sync and the evolution auto-suggest loop ALL idle until
+  // this is on. The LLM lanes are NOT affected (local lanes via the app).
+  const toggleWatchers = async (enabled: boolean) => {
+    setWatchersBusy(true)
+    try {
+      const res = await ojApi.ojSync.setWatchers(enabled)
+      if (res.ok) {
+        toast.success(res.message)
+      } else {
+        toast.error(res.message)
+      }
+      await refresh(true)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'watchers toggle failed')
+    } finally {
+      setWatchersBusy(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="space-y-3" aria-busy="true" aria-label="loading upstream status">
@@ -694,21 +720,48 @@ export function UpstreamTab() {
 
   const status: OjSyncStatus = data.status
   const inSync = status.head !== null && status.local_head !== null && status.head === status.local_head
+  const watchersOn = data.watchers?.enabled ?? false
 
   return (
     <div className="space-y-3">
-      <SectionLabel
-        right={
-          <MonoBadge className="border-white/10 text-slate-500" title={`sweeps every ${status.interval_min} min`}>
-            {status.sweeps} sweeps
-          </MonoBadge>
-        }
-      >
+      <SectionLabel>
         <span className="inline-flex items-center gap-1.5">
           <Radar aria-hidden className="h-3 w-3 text-slate-500" />
           upstream self-update
         </span>
       </SectionLabel>
+
+      {/* ---- Phase 4-b · R5: outbound watchers opt-in (dormant default) ---- */}
+      <section
+        className="mist-glass p-3.5"
+        aria-label="outbound watchers"
+      >
+        <div className="flex flex-wrap items-center gap-2.5">
+          <span
+            className={cn(
+              'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full',
+              watchersOn ? 'bg-emerald-400/15 text-emerald-300' : 'bg-slate-500/15 text-slate-400'
+            )}
+          >
+            <Eye aria-hidden className="h-2.5 w-2.5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="font-mono text-[11px] text-slate-200">outbound watchers</p>
+            <p className="mt-0.5 font-mono text-[10px] leading-relaxed text-slate-500">
+              {watchersOn
+                ? 'ON — watchlist (npmjs/github), oj-sync + mark-lv, openclaw digest and evolution auto-suggest may leave the machine'
+                : 'watchers paused — outbound off. All upstream checks idle (dormant: zero outbound). LLM lanes are unaffected.'}
+            </p>
+          </div>
+          <Switch
+            checked={watchersOn}
+            disabled={watchersBusy}
+            onCheckedChange={toggleWatchers}
+            aria-label={watchersOn ? 'disable outbound watchers' : 'enable outbound watchers'}
+            className="data-[state=checked]:bg-emerald-500/70"
+          />
+        </div>
+      </section>
 
       {/* ---- status card ---- */}
       <section className="mist-glass p-3.5" aria-label="upstream watch status">

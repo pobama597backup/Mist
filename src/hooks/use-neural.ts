@@ -7,7 +7,6 @@ import { useCallback, useEffect } from 'react'
 import { io, type Socket } from 'socket.io-client'
 import { useMistStore } from '@/lib/store'
 import { NEURAL_SERVICE_PORT } from '@/lib/mist-constants'
-import { getGoogleKey, googleTtsAvailable, googleLmGenerate, type GeminiRelayMessage } from '@/lib/google-direct'
 import type {
   ConsciousnessChunkMsg,
   ConsciousnessResponseMsg,
@@ -78,28 +77,7 @@ function ensureSocket(): Socket {
 
   const apply = (m: NeuralServerMessage) => useMistStore.getState().applyServerMessage(m)
 
-  // w8 — the gemini browser relay: when a free Google key is configured and
-  // THIS browser can reach Google (the one-shot TTS probe doubles as the
-  // region probe), announce relay capability to the neural service. Her
-  // server's Gemini egress may be region-blocked while this browser is not —
-  // then this page quietly relays her thinking to Google and back.
-  const offerGeminiRelay = () => {
-    void (async () => {
-      try {
-        const key = await getGoogleKey()
-        if (!key) return
-        if ((await googleTtsAvailable()) !== 'available') return
-        socket?.emit('relay_offer', { gemini: true })
-      } catch {
-        /* relay stays off — the server lane answers on its own */
-      }
-    })()
-  }
-
-  socket.on('connect', () => {
-    useMistStore.getState().setConnected(true)
-    offerGeminiRelay()
-  })
+  socket.on('connect', () => useMistStore.getState().setConnected(true))
   socket.on('disconnect', () => useMistStore.getState().setConnected(false))
   socket.on('consciousness_state', apply)
   socket.on('neural_state', apply)
@@ -121,32 +99,6 @@ function ensureSocket(): Socket {
     }
   })
   socket.on('synapse', (m: SynapseMsg) => synapseListeners.forEach((cb) => cb(m)))
-
-  // w8 — the neural service borrowed this browser for one Gemini round trip
-  // (her server's egress is region-blocked; this page is not). Answer with
-  // the generated text, or the honest error — never leave a request hanging.
-  socket.on(
-    'relay_gemini_req',
-    (m: { id?: string; model?: string; systemPrompt?: string; messages?: GeminiRelayMessage[] }) => {
-      const id = typeof m?.id === 'string' ? m.id : ''
-      if (!id) return
-      googleLmGenerate({
-        model: typeof m.model === 'string' && m.model ? m.model : 'gemini-2.0-flash',
-        systemPrompt: typeof m.systemPrompt === 'string' ? m.systemPrompt : '',
-        messages: Array.isArray(m.messages)
-          ? m.messages.filter((x) => x && typeof x.content === 'string' && x.content)
-          : [],
-      })
-        .then((text) => socket?.emit('relay_gemini_res', { id, ok: true, text }))
-        .catch((err: unknown) => {
-          socket?.emit('relay_gemini_res', {
-            id,
-            ok: false,
-            error: err instanceof Error ? err.message : 'relay generation failed',
-          })
-        })
-    }
-  )
   socket.on('activity', (m: ActivityMsg) => {
     latestActivity = m
     activityListeners.forEach((cb) => cb(m))

@@ -122,7 +122,9 @@ export function EfficiencyTab() {
   }, [])
 
   useEffect(() => {
-    refresh()
+    // deferred to a macrotask — refresh() setStates synchronously (setLoading)
+    const id = window.setTimeout(() => void refresh(), 0)
+    return () => window.clearTimeout(id)
   }, [refresh])
 
   if (loading) {

@@ -115,6 +115,49 @@ export function mistAudioSpectrum(bins: number): number[] | null {
 /** Reusable time-domain buffer for mistAudioWaveform (sized on first use). */
 let timeData: Uint8Array<ArrayBuffer> | null = null
 
+// ---------------- live mic energy channel (Phase 4-a · P3) ----------------
+
+// The mic's live RMS energy (0..1) used to live in the zustand neural slice,
+// written every 120ms by every push-to-talk surface. Each write rebuilt the
+// whole `neural` object and re-rendered every whole-slice subscriber (~8×/s
+// through a StatusBar). The bus replaces it: producers publish, canvas/DOM
+// consumers read the value or subscribe — ZERO React state on the hot path.
+// Producers today: chat-panel mic-controller + voice-stage hold-to-talk (both
+// 120ms loops); use-voice session start/end publishes the reset-to-0.
+
+type MicEnergyListener = (energy: number) => void
+
+let micEnergyValue = 0
+const micEnergyListeners = new Set<MicEnergyListener>()
+
+/** Publish the current mic energy (clamped 0..1). Fire-and-forget — never
+ * throws into a producer when a listener misbehaves. */
+export function publishMicEnergy(energy: number): void {
+  micEnergyValue = Math.max(0, Math.min(1, energy))
+  for (const cb of micEnergyListeners) {
+    try {
+      cb(micEnergyValue)
+    } catch {
+      /* one bad subscriber never breaks the producer */
+    }
+  }
+}
+
+/** Latest mic energy (0..1) — the pull side for rAF/DOM loops that poll at
+ * their own cadence (the neural orb reads this inside its tick). */
+export function micEnergy(): number {
+  return micEnergyValue
+}
+
+/** Subscribe to every energy publish (push side). Returns the unsubscribe fn
+ * — subscribe/unsubscribe pairs balance, strict-mode safe. */
+export function subscribeMicEnergy(cb: MicEnergyListener): () => void {
+  micEnergyListeners.add(cb)
+  return () => {
+    micEnergyListeners.delete(cb)
+  }
+}
+
 // ---------------- echo guard (Mark-LV echo.py port) ----------------
 
 /** Reusable float-dB buffer for band energies (sized on first use). */

@@ -110,13 +110,147 @@ const { spawn, exec } = require('child_process')
 
 // ---------------- config ----------------
 
-const VERSION = '3.5.0'
+const VERSION = '3.7.0'
 const PORT = Number.parseInt(process.env.MIST_BRIDGE_PORT || '8734', 10) || 8734
 const HOST = '127.0.0.1' // loopback only — never exposed to the network
 const PLATFORM = os.platform() // 'win32' | 'darwin' | 'linux'
 const HOME = os.homedir()
 const MIST_DIR = path.join(HOME, '.mist')
 const BRIDGE_CONFIG = path.join(MIST_DIR, 'bridge.json')
+
+// ---------------- Phase 1 · S1: bearer token ----------------
+// 256-bit token in ~/.mist/bridge.json (mode 0600). The app side
+// (src/lib/perimeter/shared.ts + mini-services/lib/perimeter.ts) uses the
+// same file, so every same-machine process converges on one token
+// regardless of who booted first. Whoever finds no token creates it.
+function ensureBridgeToken() {
+  try {
+    fs.mkdirSync(MIST_DIR, { recursive: true, mode: 0o700 })
+    fs.chmodSync(MIST_DIR, 0o700)
+  } catch {}
+  const cfg = readBridgeConfig()
+  if (cfg && typeof cfg.token === 'string' && /^[a-f0-9]{64}$/.test(cfg.token)) {
+    try {
+      fs.chmodSync(BRIDGE_CONFIG, 0o600)
+    } catch {}
+    return cfg.token
+  }
+  const token = crypto.randomBytes(32).toString('hex')
+  writeBridgeConfig({ token, tokenGeneratedAt: new Date().toISOString() })
+  try {
+    fs.chmodSync(BRIDGE_CONFIG, 0o600)
+  } catch {}
+  return token
+}
+const BRIDGE_TOKEN = ensureBridgeToken()
+
+// Actions that COMMAND the owner's machine (shell, writes, deletes, UI
+// driving, delegating to another agent, launching apps). Since v3.7 (Phase
+// 2-b) these run ONLY with a valid one-time Arbiter ticket in body.ticket —
+// v1.<expMs>.<nonce>.<hmac>, hmac = HMAC-SHA256(this daemon's bridge token,
+// action|argsHash|nonce|expMs), minted by the app AFTER the Arbiter allowed
+// the call. (owner_files write|move|copy|delete|mkdir|zip|unzip ops map onto
+// write_file/move_file/copy_file/delete_file/make_dir/zip_files/unzip_file
+// here.) Read-only bridge actions keep working without a ticket.
+const GATED_ACTIONS = new Set([
+  'run_command',
+  'write_file',
+  'move_file',
+  'copy_file',
+  'delete_file',
+  'make_dir',
+  'zip_files',
+  'unzip_file',
+  'ui_automate',
+  'hermes_ask',
+  'open_app',
+])
+
+// ---------------- Phase 2 · Arbiter one-time tickets ----------------
+//
+// CANONICAL SERIALIZATION (frozen spec — the app side implements the
+// IDENTICAL function in src/lib/arbiter/turn-context.ts; both files carry
+// this comment, and tests/security/wiring.test.ts pins the round-trip):
+//
+//   stableStringify(v):
+//     undefined            → "null"            (JSON.stringify drops it in objects; arrays keep a null slot)
+//     null / non-object    → JSON.stringify(v) (numbers/strings/bools)
+//     Array                → "[" + items.map(stableStringify).join(",") + "]"
+//     Object               → "{" + keys.sort() → JSON.stringify(key) + ":" + stableStringify(value),
+//                            joined with "," — UNDEFINED-VALUED KEYS ARE SKIPPED
+//                            (mirrors JSON.stringify, so the hash is over exactly
+//                            the bytes the app sent after body serialization)
+
+function stableStringify(v) {
+  if (v === undefined) return 'null'
+  if (v === null || typeof v !== 'object') {
+    const s = JSON.stringify(v)
+    return s === undefined ? 'null' : s
+  }
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']'
+  const parts = []
+  for (const key of Object.keys(v).sort()) {
+    if (v[key] === undefined) continue
+    parts.push(JSON.stringify(key) + ':' + stableStringify(v[key]))
+  }
+  return '{' + parts.join(',') + '}'
+}
+
+function argsHashForTicket(args) {
+  return crypto.createHash('sha256').update(stableStringify(args || {})).digest('hex')
+}
+
+// single-use nonce registry: nonce → expMs; pruned once entries expire past
+// the 120s skew allowance so the Set cannot grow unbounded
+const consumedTicketNonces = new Map()
+const TICKET_SKEW_MS = 5000 // clock skew tolerance between app and daemon
+const TICKET_NONCE_PRUNE_MS = 120_000
+
+function ticketHmac(action, argsHash, nonce, expMs) {
+  return crypto.createHmac('sha256', BRIDGE_TOKEN).update(`${action}|${argsHash}|${nonce}|${expMs}`).digest('hex')
+}
+
+/** Verify a one-time Arbiter ticket: shape, version, timing-safe HMAC bound
+ *  to THIS action+args, expiry (±5s skew), single-use nonce. */
+function verifyArbiterTicket(ticket, action, args) {
+  if (typeof ticket !== 'string' || ticket.length === 0) {
+    return { ok: false, reason: 'missing ticket' }
+  }
+  const parts = ticket.split('.')
+  if (parts.length !== 4) return { ok: false, reason: 'malformed ticket' }
+  const [version, expRaw, nonce, mac] = parts
+  if (version !== 'v1') return { ok: false, reason: `unsupported ticket version: ${version}` }
+  if (!/^\d{1,15}$/.test(expRaw) || !/^[a-f0-9]{12}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(mac)) {
+    return { ok: false, reason: 'malformed ticket' }
+  }
+  const expMs = Number(expRaw)
+  const expected = ticketHmac(action, argsHashForTicket(args), nonce, expMs)
+  if (!safeEqualStr(mac, expected)) {
+    return { ok: false, reason: 'hmac mismatch — forged ticket, or bound to another action/args' }
+  }
+  const now = Date.now()
+  if (now > expMs + TICKET_SKEW_MS) return { ok: false, reason: 'expired ticket' }
+  if (consumedTicketNonces.has(nonce)) return { ok: false, reason: 'single-use — ticket already consumed' }
+  consumedTicketNonces.set(nonce, expMs)
+  if (consumedTicketNonces.size > 256) {
+    for (const [n, exp] of consumedTicketNonces) {
+      if (exp + TICKET_NONCE_PRUNE_MS < now) consumedTicketNonces.delete(n)
+    }
+  }
+  return { ok: true }
+}
+
+/** Timing-safe constant-time string compare. */
+function safeEqualStr(a, b) {
+  const ba = Buffer.from(String(a))
+  const bb = Buffer.from(String(b))
+  if (ba.length !== bb.length) return false
+  try {
+    return crypto.timingSafeEqual(ba, bb)
+  } catch {
+    return false
+  }
+}
 
 const MAX_BODY_BYTES = 1024 * 1024 // 1MB JSON body cap (voice_stt gets more)
 const MAX_VOICE_BODY_BYTES = 17 * 1024 * 1024 // voice_stt carries a base64 WAV (≤12MB decoded)
@@ -281,6 +415,25 @@ function readBridgeConfig() {
   } catch {
     return {}
   }
+}
+
+// ---------------- Phase 1 · S2: intra-machine service credential ----------------
+// The app perimeter (src/proxy.ts) requires a mist_session cookie OR an
+// `x-mist-service: <sessionSecret>` header on every non-GET /api/mist call.
+// The sessionSecret lives in ~/.mist/mist.json (written by the app side,
+// 0600). Read once, cache; absent file → no header (calls will be refused
+// with 403 "session required" until the app has run once on this machine).
+const MIST_SECRETS = path.join(MIST_DIR, 'mist.json')
+let cachedSessionSecret = null
+function sessionSecret() {
+  if (cachedSessionSecret) return cachedSessionSecret
+  try {
+    const cfg = JSON.parse(fs.readFileSync(MIST_SECRETS, 'utf-8'))
+    if (cfg && typeof cfg.sessionSecret === 'string' && /^[a-f0-9]{64}$/.test(cfg.sessionSecret)) {
+      cachedSessionSecret = cfg.sessionSecret
+    }
+  } catch {}
+  return cachedSessionSecret
 }
 
 /** Merge-write ~/.mist/bridge.json (best-effort, never throws). */
@@ -3343,6 +3496,65 @@ const ACTIONS = {
     if (!command) throw new Error('command is required')
     const cwd = args.cwd !== undefined && args.cwd !== null ? jailPath(args.cwd) : HOME
     const timeoutMs = clampInt(args.timeoutMs, DEFAULT_CMD_TIMEOUT, 1000, MAX_CMD_TIMEOUT)
+    // Phase 1 · S1: run_command is GATED at the /exec door (deny-until-
+    // Arbiter) — this body is unreachable until Phase 2 reopens it with
+    // per-call tickets. When it reopens, the argv-only path below is the
+    // default: a plain single command (no shell metachars) is spawned as
+    // execFile-style argv with shell:false — never through /bin/sh. Only a
+    // command that genuinely needs pipelines/redirects falls back to exec().
+    const metachars = /[;&|<>`"'$\\\n]/
+    const argv = command.trim().split(/\s+/).filter(Boolean)
+    if (argv.length > 0 && !metachars.test(command)) {
+      return new Promise((resolve) => {
+        let stdout = ''
+        let stderr = ''
+        let done = false
+        let child
+        try {
+          child = spawn(argv[0], argv.slice(1), {
+            cwd,
+            windowsHide: true,
+            shell: false,
+          })
+        } catch (err) {
+          resolve({
+            ok: false,
+            stdout: '',
+            stderr: `spawn failed: ${err instanceof Error ? err.message : String(err)}`,
+            code: null,
+          })
+          return
+        }
+        const timer = setTimeout(() => {
+          if (!done) child.kill('SIGKILL')
+        }, timeoutMs)
+        child.stdout.on('data', (d) => {
+          stdout += String(d)
+        })
+        child.stderr.on('data', (d) => {
+          stderr += String(d)
+        })
+        child.on('error', (err) => {
+          if (done) return
+          done = true
+          clearTimeout(timer)
+          resolve({ ok: false, stdout: '', stderr: capOut(err.message, MAX_CMD_OUTPUT), code: null })
+        })
+        child.on('close', (code) => {
+          if (done) return
+          done = true
+          clearTimeout(timer)
+          resolve({
+            ok: code === 0,
+            stdout: capOut(stdout, MAX_CMD_OUTPUT),
+            stderr: capOut(stderr, MAX_CMD_OUTPUT),
+            code: typeof code === 'number' ? code : null,
+          })
+        })
+      })
+    }
+    // shell form (pipelines, redirects, env interpolation) — Phase 2 Arbiter
+    // territory; kept so the action's contract survives the gate intact.
     return new Promise((resolve) => {
       exec(
         command,
@@ -3767,17 +3979,25 @@ const ACTIONS = {
 
 // ---------------- MCP stdio server (--mcp) ----------------
 
-/** POST JSON to the local M.I.S.T. app and return the parsed body. */
+/** POST JSON to the local M.I.S.T. app and return the parsed body. Carries
+ * the intra-machine x-mist-service credential so the app perimeter lets the
+ * bridge's MCP tools (mist_ask / mist_memory_search) through. */
 function appPost(pathname, body, timeoutMs) {
   return new Promise((resolve) => {
     const payload = JSON.stringify(body)
+    const headers = {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(payload),
+    }
+    const secret = sessionSecret()
+    if (secret) headers['x-mist-service'] = secret
     const req = http.request(
       {
         host: '127.0.0.1',
         port: Number.parseInt(process.env.MIST_APP_PORT || '3000', 10) || 3000,
         path: pathname,
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+        headers,
         timeout: timeoutMs || 60000,
       },
       (res) => {
@@ -4038,11 +4258,9 @@ function runMcpServer() {
 
 // ---------------- HTTP plumbing ----------------
 
-function setCors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-}
+// Phase 1 · S1: the CORS block is GONE. This daemon never serves browsers —
+// same-origin app calls arrive server-side (no Origin header), and any
+// request carrying Origin is a cross-site browser drive-by → 403.
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload)
@@ -4106,6 +4324,19 @@ function handleExec(req, res) {
     const action = typeof body.action === 'string' ? body.action : ''
     const args =
       body.args && typeof body.args === 'object' && !Array.isArray(body.args) ? body.args : {}
+    // Phase 2 · v3.7 — actuator actions run ONLY behind a one-time Arbiter
+    // ticket (minted app-side after arbitrate() allowed the call). A missing,
+    // forged, expired, replayed or args-mismatched ticket is an honest 403.
+    if (GATED_ACTIONS.has(action)) {
+      const check = verifyArbiterTicket(body.ticket, action, args)
+      if (!check.ok) {
+        sendJson(res, 403, {
+          ok: false,
+          error: `gated: '${action}' requires an Arbiter ticket (minted only after the Arbiter allows the call) — ${check.reason}`,
+        })
+        return
+      }
+    }
     const handler = ACTIONS[action]
     if (!handler) {
       sendJson(res, 400, {
@@ -4129,12 +4360,32 @@ function handleExec(req, res) {
 
 function startHttpServer() {
   const server = http.createServer((req, res) => {
-    setCors(res)
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204)
-      res.end()
+    // ---- Phase 1 · S1 perimeter (applies to EVERY request) ----
+    // 1. Browsers never drive the bridge: any Origin header → 403 (the app
+    //    calls server-side with no Origin; CORS config cannot protect the
+    //    websocket-style drive-by, so we refuse the request outright).
+    if (req.headers.origin !== undefined) {
+      sendJson(res, 403, {
+        ok: false,
+        error: 'cross-origin rejected: the bridge never serves browsers (no CORS, no ACAO)',
+      })
       return
     }
+    // 2. No DNS-rebinding: Host must be this daemon's own loopback address.
+    const host = String(req.headers.host || '')
+    if (host !== `${HOST}:${PORT}` && host !== `localhost:${PORT}`) {
+      sendJson(res, 421, {
+        ok: false,
+        error: `misdirected request: Host must be ${HOST}:${PORT} or localhost:${PORT}`,
+      })
+      return
+    }
+    // 3. Bearer token (timing-safe) — /health stays probeable WITHOUT a
+    //    token (a minimal identity-free body) so watchdogs (dev-guard,
+    //    uptime probes) work; everything else demands the token.
+    const auth = String(req.headers.authorization || '')
+    const hasAuth = auth.length > 0
+    const authOk = safeEqualStr(auth, `Bearer ${BRIDGE_TOKEN}`)
     let url
     try {
       url = new URL(req.url || '/', `http://${HOST}:${PORT}`)
@@ -4142,8 +4393,28 @@ function startHttpServer() {
       sendJson(res, 400, { ok: false, error: 'bad request path' })
       return
     }
-    if (req.method === 'GET' && url.pathname === '/health') {
-      sendJson(res, 200, { ok: true, version: VERSION, platform: PLATFORM, hostname: os.hostname() })
+    if (url.pathname === '/health' && req.method === 'GET') {
+      // anonymous probe (dev-guard / uptime): identity-free body only.
+      // With a valid Bearer: the full status incl. platform/hostname.
+      // With a WRONG Bearer: 401 (the app-side honest token-mismatch path).
+      if (hasAuth && !authOk) {
+        sendJson(res, 401, { ok: false, error: 'bridge token mismatch (Bearer rejected)' })
+        return
+      }
+      sendJson(res, 200, {
+        ok: true,
+        version: VERSION,
+        auth: 'bearer',
+        gated: [...GATED_ACTIONS],
+        ...(authOk ? { platform: PLATFORM, hostname: os.hostname() } : {}),
+      })
+      return
+    }
+    if (!authOk) {
+      sendJson(res, 401, {
+        ok: false,
+        error: 'bridge token required: Authorization: Bearer <token from ~/.mist/bridge.json>',
+      })
       return
     }
     if (req.method === 'POST' && url.pathname === '/exec') {
@@ -4157,13 +4428,14 @@ function startHttpServer() {
     const lines = [
       '',
       '  ╔══════════════════════════════════════════╗',
-      '  ║         M I S T   B R I D G E   v3        ║',
+      '  ║     M I S T   B R I D G E   v3.7          ║',
       '  ╚══════════════════════════════════════════╝',
       '',
-      `  version   : ${VERSION}`,
+      `  version   : ${VERSION} (bearer-auth, actuator actions gated behind one-time Arbiter tickets)`,
       `  listening : http://${HOST}:${PORT}   (this machine only)`,
       `  platform  : ${PLATFORM} (${os.arch()}) — ${os.hostname()}`,
       `  home jail : ${HOME}`,
+      `  token     : ${BRIDGE_TOKEN.slice(0, 8)}…${BRIDGE_TOKEN.slice(-4)}  (full token: ${BRIDGE_CONFIG})`,
       '',
       '  Keep this window open. Mist connects automatically.',
       '  Press Ctrl+C to stop.',

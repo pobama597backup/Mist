@@ -1,0 +1,692 @@
+CONTINUE FROM THE CURRENT PROJECT STATE — DO NOT RESTART
+
+Continue working from the existing project, codebase, previous decisions, current architecture, and context you already have.
+
+This is a refinement, repair, and complete UI redesign request—not a request to start the project again, replace the existing architecture, repeat completed planning, or throw away the work you have already done.
+
+You have already been working on this application from start to finish. Use your existing understanding of the project. First inspect what is currently implemented and how it behaves, then improve it from its present state.
+
+Do not assume that my description is a complete technical diagnosis. Treat my comments as reported symptoms and desired outcomes. Reproduce the problems, inspect the actual code and rendered interface, identify the real causes, and make safe, focused improvements.
+
+Do not refresh away useful context. Do not rebuild features that already exist without first verifying that they are broken. Do not restart the project simply because the requested improvements are broad.
+
+Your responsibility is to move the current project forward while preserving its working functionality, existing identity, data, architecture, integrations, previous progress, and established assistant personality.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PRIMARY OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Improve the existing AI-assistant application so it feels like a cohesive, modern, reliable, polished, high-quality product created by an excellent professional product team.
+
+The result must be:
+
+- Clean.
+- Modern.
+- Distinctive.
+- Cohesive.
+- Responsive.
+- Accessible.
+- Visually refined.
+- Reliable.
+- Smooth.
+- Intuitive.
+- Honest about the system’s real state.
+- Consistent with the product’s existing personality and direction.
+
+Do not only make a few screens prettier. Redesign and refine the complete UI system while preserving existing capabilities.
+
+The original user feedback is authoritative for the desired outcome:
+
+- Preserve the existing progress.
+- Repair API-key and configuration reliability.
+- Repair thread loading and new-thread creation.
+- Repair voice output.
+- Restore the assistant’s personality.
+- Correct the orb’s placement and state animations.
+- Make notifications genuinely interactive.
+- Improve notification popup behavior.
+- Fix chat and thread placement.
+- Make thread panels close correctly.
+- Redesign all UI elements across the application.
+- Make the whole product feel intentional, premium, and professionally designed.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CURRENT PRODUCT CONTEXT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The application includes an AI assistant with:
+
+- A main interface.
+- An animated orb representing the assistant.
+- Assistant states such as idle, listening, thinking, speaking, and dreaming where supported.
+- Chat conversations.
+- Chat threads.
+- Notifications.
+- Voice input.
+- Voice output.
+- Model, provider, and API-key configuration.
+- The existing Kilo Code free/keyless route for text responses.
+- An established assistant personality that must be preserved.
+- Existing work and architectural decisions that must be inspected before modification.
+
+The application has already been developed substantially. Do not treat it as an empty project.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ORIGINAL USER CONCERNS — DO NOT OMIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The user is proud of the progress already made and does not want the existing project restarted. Continue from the current codebase and preserve the work already completed.
+
+However, the current interface still does not look sufficiently polished. The redesign must make the product feel clean, modern, intentional, premium, and carefully crafted—not like a collection of unfinished screens.
+
+The orb is a central visual element on the main tab. It represents the assistant and should have meaningful visual states, including:
+
+- Idle.
+- Listening.
+- Thinking.
+- Speaking.
+- Dreaming, if this state genuinely exists in the application.
+
+The orb is currently misplaced or poorly integrated into the layout. Reposition and redesign it so that it feels like the visual center of the main experience without covering controls, creating layout problems, or overwhelming the rest of the interface.
+
+The orb’s animations must be high quality and state-aware. They should communicate what the assistant is actually doing. Listening should feel responsive to microphone activity where supported. Thinking should look different from listening. Speaking should correspond to actual voice playback rather than merely text generation. Idle and dreaming should feel calm and intentional. Do not use random effects or animations that imply behavior the assistant is not performing.
+
+The user requested a notification panel, but the notification panel must be a real interactive feature, not just a visual list.
+
+Notifications must:
+
+- Be tappable or clickable.
+- Open the relevant thread, task, screen, or action when appropriate.
+- Provide useful actions when an action exists.
+- Support dismissal.
+- Support swipe-to-dismiss on touch devices.
+- Have accessible alternatives to swipe gestures.
+- Clearly distinguish read, dismissed, and resolved states.
+- Avoid falsely suggesting that an underlying error has been fixed merely because its notification was dismissed.
+- Appear on screen in a polished and predictable way.
+- Avoid covering important controls or the conversation composer.
+- Handle unread, empty, loading, error, repeated, and actionable states properly.
+
+Temporary notification popups and the persistent notification panel should feel like related but distinct experiences. Toasts should not be intrusive, chaotic, poorly positioned, or stacked in a way that blocks the interface.
+
+The chat tab requires special attention. The chat area, thread controls, and conversation content should be properly aligned and balanced.
+
+The threads are currently misplaced or behave incorrectly. When a user opens or selects a thread, inspect whether the thread panel is intended to be persistent navigation or a temporary overlay. If it is an overlay:
+
+- Selecting a thread must activate that thread.
+- The thread panel must close after selection.
+- The backdrop must disappear.
+- Any scroll lock must be removed.
+- Focus must return to the appropriate chat element.
+- The user must not be left with a thread panel covering the conversation unnecessarily.
+
+The thread panel must not unexpectedly take over the entire chat tab. Full-screen behavior on small devices is acceptable only when it is intentional, responsive, clearly navigable, and easy to close.
+
+The original functional regressions must also remain part of this task.
+
+During previous work, some API-key configurations appeared to disappear or become unavailable. Investigate whether configuration persistence, loading, state updates, fallback routing, initialization, or migrations caused this. Do not erase, replace, expose, or hardcode keys.
+
+At one point, the assistant could not:
+
+- Load existing threads.
+- Add a new chat thread.
+- Speak through voice output.
+
+The current state appears partially improved: keys and threads seem to have returned, but this must be verified rather than assumed.
+
+The assistant can hear the user, but voice output is not reliably working. The assistant may still reply through text using the Kilo Code free/keyless route, but that does not mean the voice pipeline is healthy.
+
+Trace and repair the entire voice-output path. Confirm that:
+
+- The assistant response is generated.
+- Speech synthesis or TTS is requested correctly.
+- Audio data is returned.
+- The browser accepts the audio.
+- Playback actually begins.
+- The user can hear the result.
+- Speaking state matches real playback.
+- Interruptions stop old speech.
+- Errors are visible and recoverable.
+- Audio does not silently fail because of browser permissions, user-gesture restrictions, audio formats, race conditions, cancellation, or stale state.
+
+The assistant’s personality has also become weaker or missing. Inspect how the existing personality, system instructions, memory, conversation context, provider route, and fallback route are assembled. Restore the personality already intended for this product. Do not replace it with a generic personality and do not silently omit its context when using the Kilo Code free/keyless route or another fallback.
+
+The product should feel like an assistant with a consistent identity—not merely a text model connected to a chat box.
+
+All of these concerns must be addressed alongside the complete redesign of the UI. Do not focus only on appearance while leaving the thread, notification, API-key, voice, and personality issues unresolved.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PRESERVE EXISTING WORK AND DATA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+- Preserve the current architecture unless a change is genuinely required.
+- Preserve working features, user data, conversations, threads, settings, provider configuration, integrations, and previous improvements.
+- Do not overwrite or reset stored API keys or user settings.
+- Do not silently replace configured providers with other providers.
+- Do not hardcode, expose, print, or commit credentials.
+- Do not introduce mock functionality and present it as a completed integration.
+- Do not replace the established assistant personality with a generic new persona.
+- Do not remove functionality simply because it is difficult to style.
+- Do not introduce a large dependency or rewrite without inspecting whether the existing stack already supports the needed behavior.
+- Do not repeat work that is already complete unless verification shows it is broken.
+- Do not create unnecessary parallel versions of the same component.
+- Prefer small, coherent, reversible changes and verify them as you go.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FIRST: OBSERVE AND AUDIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Before making significant changes:
+
+- Inspect the repository structure and project instructions.
+- Review the existing architecture, routes, components, state management, services, styling system, and design tokens.
+- Run the application and inspect the actual rendered interface.
+- Reproduce the reported UI and functional issues.
+- Trace relevant code paths rather than guessing.
+- Review recent changes where useful to identify regressions.
+- Run the existing build, type checks, lint checks, and tests.
+- Separate existing failures from failures introduced by your work.
+- Identify which parts are already working and should not be disturbed.
+- Inspect both desktop and mobile behavior.
+- Review browser console, server logs, network failures, and runtime errors where relevant.
+
+Create a concise internal issue map:
+
+Issue → reproduction steps → confirmed cause → affected files/components → proposed fix → verification method.
+
+Do not expose secrets while investigating.
+
+You may make autonomous design decisions. Ask for clarification only if you are genuinely blocked or a decision could cause data loss, security risk, major cost, or an irreversible architectural change.
+
+Do not stop after writing an audit or plan. Continue through implementation and verification.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RESEARCH REQUIREMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Perform several focused research passes before finalizing the redesign. Do not perform only one generic search for “modern UI.”
+
+Use credible, research-backed, and official sources. Prioritize:
+
+- Nielsen Norman Group for usability, visual hierarchy, interaction design, navigation, feedback, and consistency.
+- Official Apple Human Interface Guidelines for purposeful motion, feedback, spatial relationships, and interaction quality.
+- Official Material Design guidance for layouts, reusable components, responsive behavior, component states, and interaction patterns.
+- W3C/WAI and WCAG for accessibility, keyboard interaction, focus, contrast, status messages, and reduced-motion considerations.
+- Official browser, framework, Web Audio, speech, and provider documentation for voice and playback behavior.
+- High-quality product examples only as visual references, not as unquestioned authority.
+
+Research these areas separately:
+
+1. AI-assistant and voice-interface UX.
+2. Chat and thread navigation.
+3. Notification centers, toasts, actions, dismissal, and error recovery.
+4. Orb/ambient assistant animation and state communication.
+5. Responsive layout systems for desktop, tablet, and mobile.
+6. Component state design: hover, focus, pressed, selected, loading, disabled, error, success, and dragged.
+7. Browser audio playback, user-gesture requirements, streaming, cancellation, and actual playback state.
+8. Accessibility and reduced-motion behavior.
+9. Visual hierarchy, grid alignment, typography, contrast, spacing, and consistency.
+10. Modern design systems and reusable UI primitives.
+
+Cross-check important claims using official or well-established sources. Do not rely on low-quality articles, copied tutorials, random design galleries, or attractive mockups with no explanation of usability.
+
+Research must lead to decisions. For each important design decision, identify:
+
+- What the research or reference suggests.
+- How it applies to this application.
+- What you will implement.
+- Why it fits the existing product.
+
+Do not blindly copy Apple, Material, or any other product. Use their principles as references while creating a distinctive identity for this application.
+
+If research access is unavailable, state that limitation honestly and do not claim to have verified current guidance.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REDESIGN THE ENTIRE UI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Redesign and refine all UI elements across the application—not only the orb, notification panel, chat layout, and thread navigation.
+
+Treat every visible and interactive element as part of one cohesive design system. Inspect and improve, where appropriate:
+
+- Main navigation.
+- Sidebars and mobile drawers.
+- Headers and top bars.
+- Tabs and thread controls.
+- Buttons and icon buttons.
+- Text fields and search fields.
+- Message composer.
+- Chat bubbles and message content.
+- Streaming response states.
+- Voice controls and playback controls.
+- Orb status indicators.
+- Notification cards, banners, toasts, and notification-center elements.
+- Menus, dropdowns, popovers, dialogs, drawers, and sheets.
+- Cards, panels, containers, dividers, and empty states.
+- Loading indicators and skeleton states.
+- Success, warning, error, disabled, hover, focus, pressed, selected, active, and dragging states.
+- Tooltips and contextual help.
+- Avatars, badges, labels, timestamps, and status indicators.
+- Scrollbars and mobile navigation.
+- Settings and provider/API-key screens.
+- Configuration forms and controls.
+- Any remaining legacy, inconsistent, or visually disconnected components.
+
+Do not redesign every component randomly or for the sake of change. Preserve elements that are already strong, but bring them into visual and behavioral consistency with the improved design system.
+
+The entire application should feel like one product rather than a collection of individually styled screens.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CREATE OR REFINE A DESIGN SYSTEM
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Establish or refine shared design tokens and reusable primitives before duplicating styles across screens.
+
+Define a consistent system for:
+
+- Backgrounds and surface hierarchy.
+- Typography and text hierarchy.
+- Font sizes and line heights.
+- Spacing scale.
+- Layout grid.
+- Content widths.
+- Responsive breakpoints.
+- Corner radii.
+- Borders and dividers.
+- Shadows and elevation.
+- Accent colors.
+- Semantic colors for success, warning, error, and information.
+- Icon size, alignment, and stroke treatment.
+- Component states.
+- Layering and z-index behavior.
+- Motion durations and easing.
+- Focus indicators.
+- Reduced-motion alternatives.
+
+Use visual hierarchy intentionally. Important actions and information should be clear without making every element high-emphasis. Align layouts to a coherent grid, use color with purpose, and keep the visual language consistent across screens.
+
+Avoid:
+
+- Generic dashboard styling.
+- Random gradients.
+- Excessive glassmorphism.
+- Neon effects everywhere.
+- Heavy glow on every component.
+- Inconsistent spacing.
+- Too many type sizes.
+- Unnecessary decorative animations.
+- Visual noise that competes with the conversation.
+- UI copied from a competitor without adapting it to this product.
+
+Every major interactive component should have appropriate states, including where relevant:
+
+- Enabled.
+- Disabled.
+- Hover.
+- Focus.
+- Pressed.
+- Selected.
+- Active.
+- Loading.
+- Error.
+- Success.
+- Dragged.
+- Dismissed.
+
+States must be visually understandable and must not rely only on color.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REPAIR CREDENTIALS, THREADS, AND PERSONALITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Trace API-key and provider configuration end to end:
+
+Saved settings → configuration loading → provider initialization → request routing → response handling.
+
+Investigate:
+
+- Empty defaults overwriting saved values.
+- Broken migrations.
+- Initialization races.
+- Stale configuration caches.
+- Environment-variable mismatches.
+- Client/server configuration differences.
+- Incorrect fallback routing.
+- Provider-specific failures.
+- Configuration being lost during state updates or reloads.
+
+Fix the actual cause. Verify that settings survive reloads and restarts according to the intended persistence model.
+
+Show truthful provider status without revealing credentials.
+
+Verify that:
+
+- Existing threads load.
+- New threads can be created.
+- Selected threads show the correct conversations.
+- Switching threads does not mix messages.
+- Messages persist as intended.
+- Loading, empty, and error states are distinct.
+- Failed operations show useful recovery actions.
+- Repeated clicks cannot create duplicate requests.
+- Requests are not duplicated through lifecycle or state-management issues.
+
+Inspect how the assistant’s personality, system instructions, conversation history, memory, and relevant context are assembled for every supported route. Restore consistent personality behavior without inventing a replacement personality or silently omitting essential context during fallback routing.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REPAIR VOICE OUTPUT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Trace the complete voice flow:
+
+Microphone → speech recognition → user text → assistant response → speech synthesis → audio data → browser audio delivery → actual audible playback.
+
+Determine exactly where voice output fails.
+
+Check:
+
+- Provider configuration and authentication.
+- TTS request failures.
+- Empty or invalid audio.
+- Unsupported audio formats.
+- Streaming and chunk ordering.
+- Suspended audio contexts.
+- Rejected playback promises.
+- Browser user-gesture requirements.
+- Muted state and output volume.
+- Premature cancellation.
+- Stale event handlers.
+- Cleanup and resource leaks.
+- Race conditions between turns.
+- Whether the UI claims speaking before audio actually plays.
+
+Provide a clear enable-audio, retry, or recovery action when browser interaction is required.
+
+The assistant must enter the speaking state based on actual audio playback, not merely because text generation or a TTS request started.
+
+Preserve interruption and turn-taking behavior. When the user interrupts, pending speech must stop promptly, and stale audio must not play after a newer turn.
+
+If voice is unavailable, maintain usable text interaction and show a truthful, helpful error. Do not hide failures behind an indefinite loading animation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REDESIGN THE ORB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The orb is the signature visual element of the main screen.
+
+Place it within an intentional composition that balances:
+
+- The orb.
+- Assistant status.
+- Conversation entry points.
+- Voice controls.
+- Primary actions.
+- Supporting information.
+
+It must not overlap controls, drift because of brittle positioning, become clipped, create layout shifts, dominate small screens, or obscure important information.
+
+Create a clear state model based on real application state:
+
+Idle:
+Subtle breathing or ambient motion.
+
+Listening:
+Responsive motion based on actual microphone activity where available.
+
+Thinking:
+A distinct contained animation that communicates processing without pretending to show precise progress.
+
+Speaking:
+Motion linked to actual assistant audio playback, with smoothed audio-reactive behavior where possible.
+
+Dreaming:
+A slow ambient state only when the application has a genuine corresponding state. Do not imply background cognition or autonomous work that is not actually happening.
+
+Error/disconnected:
+A calm, understandable state paired with actionable text.
+
+Define state precedence, entry conditions, exit conditions, and transition behavior so the orb does not flicker or show contradictory states.
+
+Use readable text labels in addition to color and motion. Motion and color must not be the only way to communicate state.
+
+Respect reduced-motion preferences. Provide a way to reduce or pause nonessential ambient animation where appropriate. Suspend unnecessary rendering when the component is hidden or inactive.
+
+Prefer the simplest rendering technology that achieves the desired quality. Use Canvas or WebGL only when clearly justified by the result and performance needs.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REDESIGN NOTIFICATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Clearly distinguish:
+
+- Persistent notification center.
+- Temporary toast messages.
+- System errors requiring action.
+- Informational events.
+- Task completion or progress events.
+
+Notification-center requirements:
+
+- Clear title and message.
+- Timestamp or meaningful relative time.
+- Severity or category.
+- Read/unread treatment.
+- Relevant action such as opening a thread, inspecting a task, retrying, or navigating to settings.
+- Individual dismissal.
+- Touch swipe-to-dismiss.
+- Visible button alternative.
+- Keyboard-accessible alternative.
+- Mark-as-read behavior where appropriate.
+- Clear-all behavior that does not falsely resolve underlying errors.
+- Empty state.
+- Loading state.
+- Error state.
+- Grouping or deduplication for repeated events.
+
+Distinguish carefully:
+
+Read ≠ dismissed ≠ resolved.
+
+Dismissing an error must not falsely claim that the underlying issue has been fixed.
+
+Toast requirements:
+
+- Consistent placement and stacking.
+- Limited simultaneous visibility.
+- No obstruction of the composer or voice controls.
+- Sensible duration based on urgency.
+- Persistent or longer-lived treatment for errors requiring action.
+- Pause dismissal while hovered or focused where appropriate.
+- Accessible announcements.
+- Synchronization with the notification center without duplicate or confusing events.
+
+Use real application events rather than demonstration-only notifications.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REDESIGN CHAT AND THREADS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Choose behavior based on available screen space.
+
+Wide layouts:
+A persistent sidebar may remain visible if it preserves a balanced conversation area.
+
+Narrow layouts:
+Use a temporary drawer or sheet with clear open and close behavior.
+
+When a user selects a thread in overlay mode:
+
+- Activate the selected thread.
+- Close the drawer after successful selection.
+- Remove any stale backdrop.
+- Restore focus to an appropriate conversation element.
+- Restore scrolling correctly.
+- Do not leave an invisible modal layer or scroll lock behind.
+
+Support:
+
+- Close button.
+- Escape dismissal.
+- Backdrop dismissal where appropriate.
+- Accessible focus containment while open.
+- Correct focus restoration.
+- Clear active-thread highlighting.
+- New-thread discoverability.
+- Long-title truncation.
+- Search or filtering where the existing product supports it.
+- Independent scrolling where appropriate.
+- Loading, empty, and retry states.
+
+Improve the message area, composer, controls, spacing, readability, timestamps, user/assistant distinction, streaming states, and mobile keyboard behavior.
+
+Do not force-scroll a user who is reading older messages. Provide a clear way to return to the newest message.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MOTION, ACCESSIBILITY, AND PERFORMANCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Create one coherent motion language for drawers, menus, toasts, buttons, thread transitions, orb states, and other meaningful changes.
+
+Use motion to communicate:
+
+- State changes.
+- Spatial relationships.
+- Cause and effect.
+- Progress or completion.
+- Interaction feedback.
+
+Do not animate everything simply because animation is possible.
+
+Ensure interrupted animations settle cleanly. Prevent repeated actions from corrupting UI state.
+
+Prefer transform and opacity for ordinary interface transitions when appropriate. Measure expensive visual effects rather than assuming they are inexpensive.
+
+Include:
+
+- Keyboard navigation.
+- Visible focus indicators.
+- Accessible names.
+- Correct dialog and drawer semantics.
+- Screen-reader status messages.
+- Sufficient contrast.
+- Comfortable touch targets.
+- Reduced-motion behavior.
+- Text-based state feedback.
+- Clear error and recovery messaging.
+
+Test representative sizes, including approximately:
+
+- 360px.
+- 390px.
+- 768px.
+- 1280px.
+- 1440px.
+
+Use actual target devices or runtimes where available. Verify that the UI does not clip, overlap, overflow, or become unusable.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+IMPLEMENTATION APPROACH
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Work in this order, adapting to the existing project:
+
+1. Inspect the current project and reproduce issues.
+2. Identify confirmed regressions and their root causes.
+3. Perform focused, credible UI/UX and technical research.
+4. Repair credentials, threads, personality, and voice reliability.
+5. Establish shared design foundations and reusable UI primitives.
+6. Redesign all UI elements coherently.
+7. Refine the orb, chat, threads, notifications, and voice controls.
+8. Apply responsive, accessibility, motion, and performance improvements.
+9. Run regression checks and end-to-end verification.
+10. Review the actual rendered result and refine anything that still feels weak or inconsistent.
+
+Do not stack large numbers of unverified changes and wait until the end to test.
+
+Keep the project usable between phases.
+
+Do not stop after making a plan. Implement the improvements and verify them.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ACCEPTANCE CRITERIA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The work is successful only when:
+
+- Existing credentials and settings remain intact.
+- Provider routing remains truthful and functional.
+- Threads load correctly.
+- New threads can be created.
+- Conversations remain associated with the correct threads.
+- The intended assistant personality is preserved across supported routes.
+- Voice input and actual audible voice output work in the tested environment.
+- Playback failures provide useful recovery actions.
+- Interruptions stop stale speech.
+- The orb reflects real assistant states.
+- The orb is correctly positioned at tested screen sizes.
+- Orb animations feel intentional, smooth, and distinct across supported states.
+- Selecting a thread closes overlay navigation correctly.
+- Thread navigation does not unexpectedly take over the entire chat experience.
+- Notifications support useful actions.
+- Notifications can be dismissed through touch, pointer, and keyboard-accessible alternatives.
+- Notifications can open relevant conversations or tasks.
+- Dismissing a notification does not falsely resolve its underlying issue.
+- Toasts do not obstruct important controls.
+- All major UI elements share a coherent design language.
+- Buttons, inputs, menus, dialogs, cards, panels, tabs, notifications, forms, and controls have appropriate interaction states.
+- Loading, empty, success, warning, error, disabled, hover, focus, pressed, selected, active, and dragged states are clear where relevant.
+- Reduced-motion behavior works.
+- Responsive behavior works across compact, medium, and wide layouts.
+- The application does not expose or overwrite secrets.
+- No relevant build, type, test, or runtime regressions are introduced.
+- User data is preserved.
+- The final interface looks intentionally designed rather than merely patched.
+- Every concern from the original user feedback has been explicitly considered and verified where possible.
+
+Add or update automated tests for important regressions. Use manual end-to-end verification for interactions that cannot be reliably automated.
+
+If a test depends on unavailable credentials, hardware, browser permissions, or provider access, mark it blocked or unverified. Never report it as passed.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+At the end, provide a concise report containing:
+
+1. Confirmed root causes.
+2. Main functional fixes.
+3. Main UI and design-system changes.
+4. Screens and components redesigned.
+5. Research sources and the decisions they influenced.
+6. Tests performed and results.
+7. Passed, failed, blocked, and unverified items.
+8. Any remaining limitations or setup requirements.
+9. Before-and-after screenshots or visual evidence where available.
+
+Explicitly confirm that you considered:
+
+- Orb placement.
+- Orb state animations.
+- Idle, listening, thinking, speaking, and dreaming behavior where supported.
+- Notification actions.
+- Notification dismissal.
+- Swipe-to-dismiss.
+- Notification popup positioning.
+- Chat layout.
+- Thread placement.
+- Thread-panel closing behavior.
+- API-key persistence.
+- Thread loading.
+- New-thread creation.
+- Voice output.
+- Browser audio playback.
+- Assistant personality.
+- Full UI-element redesign.
+- Responsive behavior.
+- Accessibility.
+- Motion preferences.
+- Regression safety.
+
+Do not claim that everything is production-ready or fully fixed without verification.
+
+Begin by inspecting the existing project and rendered interface. Continue from the current state, preserve the work already completed, and carry the improvements through implementation and verification.

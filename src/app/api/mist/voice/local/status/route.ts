@@ -6,19 +6,25 @@
 // instead of a 500 crash.
 import { NextResponse } from 'next/server'
 import { bridgeExec } from '@/lib/services/bridge-service'
+import { routeError } from '@/lib/route-error'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
 export async function GET() {
-  const res = await bridgeExec('voice_status')
-  if (!res.bridgeConnected) {
-    return NextResponse.json(
-      { error: 'bridge-disconnected', bridgeConnected: false },
-      { status: 503 }
-    )
+  // Phase 3-a · R12: JSON errors only — never an HTML 500 page.
+  try {
+    const res = await bridgeExec('voice_status', {}, { origin: 'owner_voice' }) // Phase 2-b
+    if (!res.bridgeConnected) {
+      return NextResponse.json(
+        { error: 'bridge-disconnected', bridgeConnected: false },
+        { status: 503 }
+      )
+    }
+    const data = (res.data ?? {}) as Record<string, unknown>
+    const voice = data.voice && typeof data.voice === 'object' ? data.voice : null
+    return NextResponse.json({ ok: res.ok, voice, bridgeConnected: true })
+  } catch (err) {
+    return routeError(err, 'local voice status failed')
   }
-  const data = (res.data ?? {}) as Record<string, unknown>
-  const voice = data.voice && typeof data.voice === 'object' ? data.voice : null
-  return NextResponse.json({ ok: res.ok, voice, bridgeConnected: true })
 }

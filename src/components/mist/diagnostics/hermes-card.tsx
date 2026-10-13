@@ -92,9 +92,13 @@ export function HermesCard() {
   }, [])
 
   useEffect(() => {
-    void loadStatus()
+    // deferred to a macrotask — loadStatus() may setState synchronously (setChecking)
+    const t = window.setTimeout(() => void loadStatus(), 0)
     const id = setInterval(() => void loadStatus(), 60_000)
-    return () => clearInterval(id)
+    return () => {
+      window.clearTimeout(t)
+      clearInterval(id)
+    }
   }, [loadStatus])
 
   const offline = status?.error === 'bridge-disconnected' || status?.ok === false

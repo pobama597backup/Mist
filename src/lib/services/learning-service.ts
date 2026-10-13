@@ -53,9 +53,13 @@ import { db } from '@/lib/db'
 import { getZai } from './zai'
 import { getCoreTextModelSelection, noteCoreReportedModel } from './core-models'
 import { logAutonomyEvent } from './autonomy-service'
+import * as lifecycle from './lifecycle'
 
 export interface TurnInfo {
   threadId: string
+  /** Phase 2-c: the unified turn's Arbiter id — taint-checks the auto-learn
+   *  skill save (a tainted turn's skills go to the quarantine inbox). */
+  turnId?: string | null
   userText: string
   replyText: string
   toolsUsed: string[]
@@ -441,17 +445,22 @@ export async function reflectOnTurn(
   }
 
   // save via skills-service upsert (lazy import — same cycle reasoning), then
-  // stamp origin/confidence (saveSkill itself never touches those fields)
+  // stamp origin/confidence (saveSkill itself never touches those fields).
+  // Phase 2-c: the save rides the turn's taint state — a tainted turn
+  // quarantines the skill for owner review instead of writing it.
   const { saveSkill } = await import('./skills-service')
-  const saved = await saveSkill({
-    name: proposal.name,
-    trigger: proposal.trigger,
-    steps: proposal.steps,
-    tool_chain: proposal.toolChain,
-    notes:
-      `auto-learned after a ${info.toolsUsed.length}-tool turn (confidence ${proposal.confidence.toFixed(2)})` +
-      (info.skillUsed ? ` — grew out of skill "${info.skillUsed}"` : ''),
-  })
+  const saved = await saveSkill(
+    {
+      name: proposal.name,
+      trigger: proposal.trigger,
+      steps: proposal.steps,
+      tool_chain: proposal.toolChain,
+      notes:
+        `auto-learned after a ${info.toolsUsed.length}-tool turn (confidence ${proposal.confidence.toFixed(2)})` +
+        (info.skillUsed ? ` — grew out of skill "${info.skillUsed}"` : ''),
+    },
+    { auto: true, turnId: info.turnId ?? null, source: 'learning-loop' }
+  )
   await stampAutoSkill(saved.name, proposal.confidence)
 
   // autonomy ledger + system alert (lands in the chat via the alerts pipeline)
@@ -527,7 +536,7 @@ function toolChainOf(row: RawSkillRow): string[] {
   return []
 }
 
-async function refineSkill(name: string): Promise<void> {
+async function refineSkill(name: string, turnId?: string | null): Promise<void> {
   const row = await getRawSkill(name)
   if (!row) return
 
@@ -580,15 +589,20 @@ async function refineSkill(name: string): Promise<void> {
   // upsert via skills-service (preserving trigger + tool chain), then bump version.
   // saveSkill's update branch rewrites trigger/steps/notes/toolChain only —
   // origin/confidence/uses stay untouched.
+  // Phase 2-c: refinement rides the executing turn's taint state (quarantine
+  // on taint) and lands trust 'derived' with learning-loop provenance.
   const { saveSkill } = await import('./skills-service')
   const toolChain = toolChainOf(row)
-  await saveSkill({
-    name: row.name,
-    trigger: row.trigger,
-    steps,
-    tool_chain: toolChain,
-    notes: notes ?? row.notes,
-  })
+  await saveSkill(
+    {
+      name: row.name,
+      trigger: row.trigger,
+      steps,
+      tool_chain: toolChain,
+      notes: notes ?? row.notes,
+    },
+    { auto: true, turnId, source: 'learning-loop' }
+  )
   const newVersion = await bumpSkillVersion(row.name)
 
   await logAutonomyEvent('skill_refined', `${row.name} refined to v${newVersion} after ${row.uses} uses`, {
@@ -616,6 +630,8 @@ export function onSkillExecuted(info: {
   output?: string
   success: boolean
   error?: string
+  /** Phase 2-c: the executing turn (taint-checks the refinement save) */
+  turnId?: string | null
 }): void {
   try {
     void (async () => {
@@ -631,7 +647,7 @@ export function onSkillExecuted(info: {
         const last = g.lastAt.get(info.skill) ?? 0
         if (Date.now() - last < REFINE_COOLDOWN_MS) return
         g.lastAt.set(info.skill, Date.now())
-        await refineSkill(info.skill)
+        await refineSkill(info.skill, info.turnId ?? null)
       } catch {
         // never throws
       }
@@ -719,11 +735,25 @@ export async function curateMemory(): Promise<{ factsLearned: number; notes: str
 
   let learned = 0
   const keys: string[] = []
+  // Phase 2-c (S11): curation runs unattended (no turn registry to consult),
+  // so each fact gets the injection scan — instruction-shaped text riding a
+  // transcript into long-term memory is quarantined for the owner instead of
+  // written; clean facts land trust 'derived' with curation provenance.
+  const { scanToolResult } = await import('@/lib/oj/guardrails')
+  const { quarantineWrite } = await import('@/lib/arbiter/quarantine')
   for (const f of facts.slice(0, 3)) {
+    const scan = scanToolResult(`${f.key}: ${f.value}`)
+    if (!scan.clean && (scan.threat === 'high' || scan.threat === 'critical')) {
+      await quarantineWrite('fact', JSON.stringify(f), {
+        source: 'memory-curation',
+        reason: `injection-shaped fact (${scan.findings.map((x) => x.pattern).join(', ')}) — quarantined pending owner review`,
+      })
+      continue
+    }
     await db.longtermMemory.upsert({
       where: { key: f.key },
-      update: { value: f.value },
-      create: { key: f.key, value: f.value },
+      update: { value: f.value, trust: 'derived', source: 'memory-curation' },
+      create: { key: f.key, value: f.value, trust: 'derived', source: 'memory-curation' },
     })
     await db.vectorMemory
       .create({
@@ -994,4 +1024,11 @@ export function ensureLearningWatch(): void {
     void rebuildUserModel().catch(() => undefined)
   }, USER_MODEL_INTERVAL_MS)
   modelTimer.unref?.()
+
+  // Phase 3-a: both loops register ONE lifecycle stop (they arm together or
+  // not at all — the once-flag above guarantees a single pair exists).
+  lifecycle.register('learning-watch', () => {
+    clearInterval(curateTimer)
+    clearInterval(modelTimer)
+  })
 }

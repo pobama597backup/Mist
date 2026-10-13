@@ -331,7 +331,7 @@ const LANES: LaneDef[] = [
     signupUrl: 'https://aistudio.google.com',
     outOfBox: false,
     activationEnv: 'GEMINI_API_KEY',
-    notes: 'Gemini Pro/Flash with a free AI Studio key — the SAME key also powers the Gemini voice engine (Settings → Voice), and when the server\'s Google egress is region-blocked, her open browser relays the lane\'s requests. One key, mind and voice.',
+    notes: 'Gemini Pro/Flash with a free AI Studio key — the existing `gemini` provider, already wired.',
   },
   {
     id: 'local-runtime',

@@ -6,6 +6,7 @@
 // link, keyboard hint.
 
 import { useEffect, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { Ear, EarOff } from 'lucide-react'
 import { toast } from 'sonner'
 import { useBackendStatus } from '@/hooks/use-backend'
@@ -16,21 +17,39 @@ import { cn } from '@/lib/utils'
 
 export function StatusBar() {
   const backend = useBackendStatus()
-  const neural = useMistStore((s) => s.neural)
+  // Phase 4-a · P3: the whole-slice subscription is gone. It re-rendered this
+  // bar ~8×/s through any mic session (the old 120ms setAudioEnergy writes
+  // rebuilt the `neural` object) and ~1×/s on idle service pulses. The energy
+  // itself now rides the audio bus (lib/audio-bus.ts) — zero React state on
+  // the hot path. What remains is this shallow-picked set of fields the bar
+  // actually renders; useShallow stops the ~950ms service pulses that only
+  // touch other fields from re-rendering it.
+  const neural = useMistStore(
+    useShallow((s) => ({
+      state: s.neural.state,
+      load: s.neural.load,
+      provider: s.neural.provider,
+      fallback: s.neural.fallback,
+      connected: s.neural.connected,
+    }))
+  )
   const wakeWordEnabled = useMistStore((s) => s.wakeWordEnabled)
   const setWakeWordEnabled = useMistStore((s) => s.setWakeWordEnabled)
-  const [tools, setTools] = useState<{ implemented: number; total: number } | null>(null)
+  const [tools, setTools] = useState<{ count: number; omni: number; skills: number } | null>(null)
 
   useEffect(() => {
     let alive = true
+    // Phase 3-b · P9: the chip needs NUMBERS, not the registry — the count
+    // endpoint returns them without the full ToolInfo payload or the
+    // gateway/pilot probes /tools/list performs. (The whole-slice neural
+    // subscription above is the known P3 over-subscription — Phase 4's
+    // selector work, deliberately untouched here.)
     mistApi
-      .tools.list()
-      .then((list) => {
-        if (!alive || !Array.isArray(list) || list.length === 0) return
-        setTools({
-          implemented: list.filter((t) => t.implemented).length,
-          total: list.length,
-        })
+      .tools
+      .count()
+      .then((c) => {
+        if (!alive || typeof c?.count !== 'number') return
+        setTools(c)
       })
       .catch(() => {
         /* backend not up yet — the chip simply stays hidden */
@@ -82,9 +101,9 @@ export function StatusBar() {
           {tools ? (
             <span
               className="hidden shrink-0 items-center rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-slate-400 sm:flex"
-              title={`${tools.implemented} of ${tools.total} tools implemented`}
+              title={`${tools.count} tools live — ${tools.omni} omniroute · ${tools.skills} learned skills`}
             >
-              {tools.implemented}/{tools.total} TOOLS
+              {tools.count} TOOLS
             </span>
           ) : null}
         </div>
@@ -107,9 +126,10 @@ export function StatusBar() {
             }
             className={cn(
               'flex shrink-0 items-center justify-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-widest transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60',
-              // icon-only on phones → enforce a real touch target (32px) that
-              // unwraps back to natural size once the text label shows (sm+)
-              'min-h-8 min-w-8 sm:min-h-0 sm:min-w-0',
+              // icon-only on phones → enforce the full 44px touch target
+              // (matches the navbar's h-11 controls); unwraps back to natural
+              // chip size once the text label shows (sm+)
+              'min-h-11 min-w-11 sm:min-h-0 sm:min-w-0',
               wakeWordEnabled
                 ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300 hover:border-emerald-400/50'
                 : 'border-white/10 bg-white/5 text-slate-500 hover:text-slate-300'

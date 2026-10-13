@@ -183,68 +183,6 @@ export function googleTtsAvailable(): Promise<GoogleTtsProbe> {
 }
 
 // ---------------------------------------------------------------------------
-// LM relay — browser-direct text generation (w8: one free key, mind + voice)
-// ---------------------------------------------------------------------------
-
-export interface GeminiRelayMessage {
-  role: 'user' | 'assistant'
-  content: string
-}
-
-/**
- * Generate TEXT browser-direct with the same free AI Studio key that powers
- * the voice engine — her mind lane's lifeboat when the server's Gemini
- * egress is region-blocked (the same asymmetry the voice engine solves
- * browser-direct): the neural service relays the request here, the browser
- * POSTs to Google (permissive CORS for API-key requests), and the lane
- * answers as if the server had reached Google itself. Throws the HONEST
- * message on any failure — Google's own words verbatim when it speaks.
- */
-export async function googleLmGenerate(opts: {
-  model: string
-  systemPrompt: string
-  messages: GeminiRelayMessage[]
-}): Promise<string> {
-  if (typeof window === 'undefined') throw new Error('gemini direct: browser-only path')
-  const key = await getGoogleKey()
-  if (!key) throw new Error('gemini direct: no Google API key configured on this instance')
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(opts.model)}:generateContent?key=${encodeURIComponent(key)}`
-  let res: Response
-  try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: opts.systemPrompt }] },
-        contents: opts.messages.map((m) => ({
-          role: m.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: m.content }],
-        })),
-      }),
-    })
-  } catch (err) {
-    throw new Error(
-      `gemini direct: Google unreachable from this browser (${err instanceof Error ? err.message : 'network error'})`
-    )
-  }
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    const gmsg = /"message"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(body)?.[1] ?? body.slice(0, 300)
-    throw new Error(`gemini direct: HTTP ${res.status}${gmsg ? ` — ${gmsg}` : ''}`)
-  }
-  const json = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
-  }
-  const text = (json.candidates?.[0]?.content?.parts ?? [])
-    .map((p) => (typeof p.text === 'string' ? p.text : ''))
-    .join('')
-    .trim()
-  if (!text) throw new Error('gemini direct: response carried no text')
-  return text
-}
-
-// ---------------------------------------------------------------------------
 // Chunker — the client-side mirror of the server's lead/follow strategy
 // ---------------------------------------------------------------------------
 

@@ -20,7 +20,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <html lang="en">
 <head>
-<!-- Face adapted from ai-visualizer by Jared Rhodenizer (github.com/jaredrhod/ai-visualizer), AGPL-3.0. Embedded for M.I.S.T. with the bus shim above. -->
+<!-- Face adapted from ai-visualizer by Jared Rhodenizer (github.com/jaredrhod/ai-visualizer), AGPL-3.0. Embedded for M.I.S.T. (postMessage bus transport lives in core.js). -->
 
 <meta charset="UTF-8">
 <title>The Radial</title>
@@ -32,37 +32,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 </head>
 <body>
 <canvas id="stage"></canvas>
-<script>
-/* ------------------------------------------------------------------ *
- * M.I.S.T. bus shim (added for the Mist web app).
- * When this face is embedded inside the Mist app (a same-origin parent
- * that exposes window.__mistBus), the /state and /config polls are
- * answered LIVE by the parent app instead of the network, so the face
- * performs Mist's real voice state. Opened standalone, nothing changes.
- * Faces + core.js are from github.com/jaredrhod/ai-visualizer (AGPL-3.0).
- * ------------------------------------------------------------------ */
-(function () {
-  try {
-    var bus = window.parent && window.parent.__mistBus;
-    if (!bus) return;
-    var realFetch = window.fetch.bind(window);
-    window.fetch = function (url, opts) {
-      var u = String(url);
-      if (u.indexOf("/state") !== -1) {
-        return Promise.resolve(new Response(JSON.stringify(bus.state()), {
-          headers: { "Content-Type": "application/json" }
-        }));
-      }
-      if (u.indexOf("/config") !== -1) {
-        return Promise.resolve(new Response(JSON.stringify(bus.config()), {
-          headers: { "Content-Type": "application/json" }
-        }));
-      }
-      return realFetch(url, opts);
-    };
-  } catch (e) { /* cross-origin / no parent — standalone behavior */ }
-})();
-</script>
+<!-- Phase 6-b (sandbox migration): the M.I.S.T. bus shim that used to live
+     here — same-origin window.parent.__mistBus access — moved INTO core.js
+     as a postMessage transport. The app now mounts this frame fully
+     sandboxed (sandbox="allow-scripts", no allow-same-origin), and core.js
+     talks to the parent exclusively via window.parent.postMessage with a
+     strict origin target. Opened standalone, nothing changes. -->
 <script src="../../core.js"></script>
 <script>
 "use strict";

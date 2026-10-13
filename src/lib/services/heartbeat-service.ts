@@ -25,6 +25,7 @@ import type { AlertInfo, HeartbeatStatus, WatchlistEntry } from '@/lib/types'
 import { recordActivity } from './activity-service'
 import { sweepWatchlist, watchlistIntervalHours, watchlistAutoUpdate } from './watchlist-service'
 import { getTelemetry } from './telemetry-service'
+import * as lifecycle from './lifecycle'
 
 const HEARTBEAT_INTERVAL_S = 60
 const STATE_FILE = path.join(process.cwd(), 'db', 'heartbeat-state.json')
@@ -325,7 +326,7 @@ async function guardianTick(lastWarned: Record<string, string>): Promise<number>
   let source = 'bridge'
   try {
     const { bridgeExec } = await import('./bridge-service')
-    const res = await bridgeExec('system_watch', {})
+    const res = await bridgeExec('system_watch', {}, { origin: 'owner_heartbeat' }) // Phase 2-b
     if (res.bridgeConnected && res.ok === true) {
       const data = res.data as { system?: GuardianSnapshot } | undefined
       if (data?.system && typeof data.system === 'object') sys = data.system
@@ -424,7 +425,7 @@ function hermesFingerprint(data: unknown): HermesWatchState['lastState'] {
 /** One Hermes watch pass: probe → diff → alert on CHANGE only. NEVER fatal. */
 async function hermesWatchTick(): Promise<number> {
   const { bridgeExec } = await import('./bridge-service')
-  const res = await bridgeExec('hermes_status', {})
+  const res = await bridgeExec('hermes_status', {}, { origin: 'owner_heartbeat' }) // Phase 2-b
   if (!res.bridgeConnected || res.ok !== true) return 0 // bridge off is normal
   const next = hermesFingerprint(res.data)
   const prev = await readHermesWatch()
@@ -667,5 +668,9 @@ export function ensureHeartbeatWatch(): void {
     HEARTBEAT_INTERVAL_S * 1000
   )
   g.timer.unref?.()
+  // Phase 3-a: the loop registers its stop with the lifecycle registry (the
+  // SIGTERM path in instrumentation.ts clears it); re-registration replaces
+  // the previous compile's entry — same once-flag semantics as above.
+  lifecycle.registerInterval('heartbeat-watch', g.timer)
   recordActivity('heartbeat', 'proactive loop armed (60s)')
 }

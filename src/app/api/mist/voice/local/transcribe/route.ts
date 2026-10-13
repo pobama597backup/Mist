@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'wav_b64 exceeds the 16MB character limit' }, { status: 413 })
     }
 
-    const res = await bridgeExec('voice_stt', { wav_b64: body.wav_b64 })
+    const res = await bridgeExec('voice_stt', { wav_b64: body.wav_b64 }, { origin: 'owner_voice' }) // Phase 2-b
     if (!res.bridgeConnected) {
       return NextResponse.json(
         { error: 'bridge-disconnected', bridgeConnected: false },

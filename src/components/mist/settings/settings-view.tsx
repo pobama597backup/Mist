@@ -20,6 +20,7 @@ import {
   Mic,
   Minus,
   Monitor,
+  Palette,
   Play,
   RotateCcw,
   RotateCw,
@@ -62,6 +63,7 @@ import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { useTelemetry } from '@/hooks/use-telemetry'
+import { useTabBoundary } from '@/hooks/use-tab-boundary'
 import { mistApi } from '@/lib/mist-api'
 import { useMistStore } from '@/lib/store'
 import { TTS_VOICES, TTS_ENGINES, FREE_TTS_VOICES, GEMINI_DIRECT_VOICES } from '@/lib/mist-constants'
@@ -84,16 +86,18 @@ import {
 } from '@/lib/services/voice-local'
 import type { VoiceMode } from '@/lib/store'
 
-// Accent color options
-const ACCENT_COLORS = [
-  '#a855f7', // purple
-  '#3b82f6', // blue
-  '#10b981', // emerald
-  '#f59e0b', // amber
-  '#ef4444', // red
-  '#8b5cf6', // violet
-  '#ec4899', // pink
-  '#06b6d4', // cyan
+// Accent color options — v-redesign: labeled + consumed by the Appearance
+// radiogroup (the old bare-hex list was dead code; no swatch UI existed).
+// Purple is the shipped default; the rest are the owner's palette.
+const ACCENT_SWATCHES: { value: string; label: string }[] = [
+  { value: '#a855f7', label: 'Purple' },
+  { value: '#e879f9', label: 'Fuchsia' },
+  { value: '#8b5cf6', label: 'Violet' },
+  { value: '#2dd4bf', label: 'Teal' },
+  { value: '#34d399', label: 'Emerald' },
+  { value: '#22d3ee', label: 'Cyan' },
+  { value: '#fbbf24', label: 'Amber' },
+  { value: '#fb7185', label: 'Rose' },
 ]
 
 // ---------- provider model (env names mirror .env.example) ----------
@@ -176,7 +180,7 @@ const PROVIDER_SPECS: ProviderSpec[] = [
     id: 'gemini',
     label: 'Gemini',
     fields: [
-      { key: 'GEMINI_API_KEY', label: 'API key', type: 'password', placeholder: 'AIza… free at aistudio.google.com' },
+      { key: 'GEMINI_API_KEY', label: 'API key', type: 'password', placeholder: '••••••••' },
       { key: 'GEMINI_MODEL', label: 'Model', type: 'text', placeholder: 'gemini-2.0-flash' },
     ],
   },
@@ -511,6 +515,10 @@ function CompanionRow({
 // ---------- main view ----------
 
 export function SettingsView() {
+  // Phase 3-b · TabBoundary: the telemetry poll (2s interval) sleeps while
+  // the tab is hidden — useTelemetry's `enabled` flag already owns the
+  // interval lifecycle, so the boundary is a one-word gate.
+  const { visible: tabVisible } = useTabBoundary('settings-view')
   const animationIntensity = useMistStore((s) => s.animationIntensity)
   const setAnimationIntensity = useMistStore((s) => s.setAnimationIntensity)
   const reducedMotion = useMistStore((s) => s.reducedMotion)
@@ -550,6 +558,9 @@ export function SettingsView() {
   const [bridgeError, setBridgeError] = useState(false)
   const [bridgeUrl, setBridgeUrl] = useState('')
   const [bridgeBusy, setBridgeBusy] = useState<'save' | 'test' | null>(null)
+  // Phase 1 · S1 — the daemon's bearer token (owner-visible, copyable)
+  const [bridgeTokenValue, setBridgeTokenValue] = useState<string | null>(null)
+  const [bridgeTokenSeen, setBridgeTokenSeen] = useState(false)
 
   // take-her-home (portable export) — full tar.gz of everything she is
   const [exportBusy, setExportBusy] = useState(false)
@@ -590,12 +601,16 @@ export function SettingsView() {
   useEffect(() => {
     if (voiceEngine !== 'gemini') return
     let alive = true
-    setGeminiProbe('unknown')
-    googleTtsAvailable().then((s) => {
-      if (alive) setGeminiProbe(s)
-    })
+    // deferred to a macrotask — the 'unknown' reset setStates synchronously
+    const id = window.setTimeout(() => {
+      setGeminiProbe('unknown')
+      googleTtsAvailable().then((s) => {
+        if (alive) setGeminiProbe(s)
+      })
+    }, 0)
     return () => {
       alive = false
+      window.clearTimeout(id)
     }
   }, [voiceEngine])
   const localVoiceScannedRef = useRef(false)
@@ -635,6 +650,18 @@ export function SettingsView() {
       })
       .catch(() => {
         if (alive) setBridgeError(true)
+      })
+    // Phase 1 · S1 — owner-only token read (needs the paired session; the
+    // proxy auto-pairs on first page load, so a fresh browser gets it on reload)
+    fetch('/api/mist/bridge/token')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { token?: string } | null) => {
+        if (!alive) return
+        setBridgeTokenSeen(true)
+        setBridgeTokenValue(typeof body?.token === 'string' && body.token ? body.token : null)
+      })
+      .catch(() => {
+        if (alive) setBridgeTokenSeen(true)
       })
     return () => {
       alive = false
@@ -691,7 +718,7 @@ export function SettingsView() {
     return m
   }, [llmStatus])
 
-  const { data: t, history } = useTelemetry(true, 2000)
+  const { data: t, history } = useTelemetry(tabVisible, 2000)
 
   const vaultScan = () => {
     setVaultBusy('scan')
@@ -847,12 +874,9 @@ export function SettingsView() {
     return () => window.clearTimeout(t)
   }, [bridge, scanCompanions])
 
-  // Apply glass effect styles to the root element
-  useEffect(() => {
-    document.documentElement.style.setProperty('--glass-opacity', `${glassOpacity / 100}`)
-    document.documentElement.style.setProperty('--glass-blur', `${glassBlur}px`)
-    document.documentElement.style.setProperty('--accent-color', accentColor)
-  }, [glassOpacity, glassBlur, accentColor])
+  // v-redesign: the glass/accent vars are now mirrored app-wide by app-shell
+  // (from boot, surviving reloads) — the old Settings-only writer here was
+  // both redundant and a no-op (nothing consumed the vars before the redesign).
 
   const performSignalTest = () => {
     if (signalPerforming) return
@@ -905,7 +929,10 @@ export function SettingsView() {
     if (localVoiceScannedRef.current) return
     if (bridge === null) return
     localVoiceScannedRef.current = true
-    refreshLocalVoice(true)
+    // deferred to a macrotask — refreshLocalVoice setStates synchronously
+    // (setVoiceChecking); same shape as the companions auto-scan above
+    const t = window.setTimeout(() => void refreshLocalVoice(true), 0)
+    return () => window.clearTimeout(t)
   }, [bridge, refreshLocalVoice])
 
   const installVoiceEngine = (engine: 'stt' | 'tts') => {
@@ -1092,6 +1119,123 @@ export function SettingsView() {
               aria-label="Reduce motion"
               className="data-[state=checked]:bg-purple-400/80"
             />
+          </div>
+
+          {/* v-redesign · Appearance — the store prefs finally have a control
+              surface. Accent drives the app-wide glow language (selection,
+              shimmer, ripples, beams, focus rings) via --accent-color; glass
+              intensity + blur scale every mist-glass* surface through
+              --glass-opacity / --glass-blur. Defaults 30/16/#a855f7 = the
+              shipped look, exactly. */}
+          <div className="space-y-4 rounded-xl border border-white/10 bg-white/[0.03] p-3.5">
+            <div className="flex items-center gap-2.5">
+              <span aria-hidden="true" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-purple-400/30 bg-purple-400/10 text-purple-300">
+                <Palette className="h-4 w-4" />
+              </span>
+              <Label className="text-xs text-slate-200">
+                Appearance{' '}
+                <span className="block text-[10px] text-slate-500">
+                  her surface — accent tints the glow, shimmer and focus rings; the glass dials shape every frosted panel
+                </span>
+              </Label>
+            </div>
+
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <span id="accent-label" className="text-xs text-slate-300">
+                  Accent
+                </span>
+                <span className="font-mono text-[10px] uppercase tracking-widest text-slate-500">
+                  {ACCENT_SWATCHES.find((a) => a.value === accentColor)?.label ?? 'custom'}
+                </span>
+              </div>
+              <div
+                role="radiogroup"
+                aria-labelledby="accent-label"
+                className="flex flex-wrap items-center gap-2.5"
+              >
+                {ACCENT_SWATCHES.map((a) => {
+                  const selected = accentColor === a.value
+                  return (
+                    <button
+                      key={a.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      aria-label={`${a.label} accent`}
+                      onClick={() => setAccentColor(a.value)}
+                      className={cn(
+                        'flex h-11 w-11 items-center justify-center rounded-full border-2 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950',
+                        selected
+                          ? 'scale-110 border-white/90 shadow-[0_0_16px_-2px_var(--accent-color)]'
+                          : 'border-white/15 hover:scale-105 hover:border-white/40'
+                      )}
+                      style={{ backgroundColor: a.value }}
+                    >
+                      {selected && <Check className="h-4 w-4 text-white drop-shadow" aria-hidden="true" />}
+                      <span className="sr-only">{a.label}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="glass-intensity" className="text-xs text-slate-300">
+                  Glass intensity
+                </Label>
+                <span className="font-mono text-[11px] tabular-nums text-purple-300">{glassOpacity}</span>
+              </div>
+              <Slider
+                id="glass-intensity"
+                value={[glassOpacity]}
+                min={10}
+                max={100}
+                step={1}
+                onValueChange={(v) => setGlassOpacity(v[0] ?? glassOpacity)}
+                aria-label="Glass intensity"
+                className="py-1 [&_[data-slot=slider-thumb]]:border-purple-400 [&_[data-slot=slider-range]]:bg-purple-400/70"
+              />
+            </div>
+
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="glass-blur" className="text-xs text-slate-300">
+                  Glass blur
+                </Label>
+                <span className="font-mono text-[11px] tabular-nums text-purple-300">{glassBlur}px</span>
+              </div>
+              <Slider
+                id="glass-blur"
+                value={[glassBlur]}
+                min={0}
+                max={40}
+                step={1}
+                onValueChange={(v) => setGlassBlur(v[0] ?? glassBlur)}
+                aria-label="Glass blur"
+                className="py-1 [&_[data-slot=slider-thumb]]:border-purple-400 [&_[data-slot=slider-range]]:bg-purple-400/70"
+              />
+              <div className="flex justify-between font-mono text-[10px] text-slate-500">
+                <span>clear</span>
+                <span>frosted</span>
+              </div>
+            </div>
+
+            {(glassOpacity !== 30 || glassBlur !== 16 || accentColor !== '#a855f7') && (
+              <button
+                type="button"
+                onClick={() => {
+                  setGlassOpacity(30)
+                  setGlassBlur(16)
+                  setAccentColor('#a855f7')
+                }}
+                className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 font-mono text-[11px] uppercase tracking-wider text-slate-300 transition-colors hover:border-white/25 hover:bg-white/[0.08] hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
+              >
+                <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                Reset to shipped look
+              </button>
+            )}
           </div>
 
           <div className="flex items-center justify-between gap-4">
@@ -1462,11 +1606,42 @@ export function SettingsView() {
               <p className="mt-1.5 truncate font-mono text-[11px] text-slate-300" title={bridge.url}>
                 {bridge.url}
               </p>
+              {bridge.authError ? (
+                <p className="mt-1 font-mono text-[10px] leading-relaxed text-amber-300/80">{bridge.authError}</p>
+              ) : null}
               {bridge.checkedAt ? (
                 <p className="mt-1 font-mono text-[10px] text-slate-500">
                   checked {relTime(new Date(bridge.checkedAt).toISOString())}
                 </p>
               ) : null}
+              {/* Phase 1 · S1 — the daemon's bearer token (presence + copy) */}
+              <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-white/5 pt-2">
+                <span className="font-mono text-[10px] text-slate-500">bridge token</span>
+                {bridgeTokenValue ? (
+                  <MonoBadge className="border-emerald-400/30 bg-emerald-400/10 text-emerald-300">
+                    {bridgeTokenValue.slice(0, 8)}…{bridgeTokenValue.slice(-4)}
+                  </MonoBadge>
+                ) : (
+                  <MonoBadge className="border-white/10 text-slate-500">{bridgeTokenSeen ? 'unavailable' : 'session pairs on next reload'}</MonoBadge>
+                )}
+                {bridgeTokenValue ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      navigator.clipboard
+                        .writeText(bridgeTokenValue)
+                        .then(() => toast.success('Bridge token copied'))
+                        .catch(() => toast.error('Could not copy — select it manually'))
+                    }}
+                    className="h-7 gap-1.5 border-white/15 bg-white/5 px-2.5 font-mono text-[10px] text-slate-300 hover:border-white/30 hover:bg-white/10"
+                  >
+                    <Copy className="h-3 w-3" aria-hidden="true" />
+                    Copy
+                  </Button>
+                ) : null}
+              </div>
             </>
           )}
         </div>
@@ -1966,9 +2141,10 @@ export function SettingsView() {
       <motion.section {...sectionMotion(14)} aria-label="Take her home" className="mist-glass p-5 sm:p-6">
         <SectionLabel>take her home</SectionLabel>
         <p className="mt-1.5 font-mono text-[10px] leading-relaxed text-slate-500">
-          download the complete Mist — source, skills, missions, memories, dreams, conversations, voice engines and a
-          portable .env carrying your keys and her brain pick. unzip on any machine, run <span className="text-slate-300">run.bat</span> (or
-          <span className="text-slate-300"> bun dev</span>) and she wakes up exactly as she is right now.
+          download the complete Mist — source, skills, missions, conversations, voice engines and an env template with
+          her brain pick. your secrets stay behind: keys are never packed (an encrypted keys bundle is available on
+          request). unzip on any machine, run <span className="text-slate-300">run.bat</span> (or
+          <span className="text-slate-300"> bun dev</span>) and she wakes up.
         </p>
         <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
           <Button
@@ -1979,10 +2155,18 @@ export function SettingsView() {
               if (exportBusy) return
               setExportBusy(true)
               try {
-                const res = await fetch('/api/mist/bridge/export')
+                // Phase 1: POST + typed confirmation + session (secrets never travel)
+                const res = await fetch('/api/mist/bridge/export', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ confirm: 'EXPORT' }),
+                })
                 if (!res.ok) {
                   const detail = await res.json().catch(() => null)
-                  throw new Error(detail?.error ?? `export failed (HTTP ${res.status})`)
+                  throw new Error(
+                    detail?.error ??
+                      `export failed (HTTP ${res.status})${res.status === 401 ? ' — reload the page once so your session pairs' : ''}`
+                  )
                 }
                 const blob = await res.blob()
                 const url = URL.createObjectURL(blob)

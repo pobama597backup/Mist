@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
 
     let res
     if (action === 'discover') {
-      res = await bridgeExec('voice_discover')
+      res = await bridgeExec('voice_discover', {}, { origin: 'owner_voice' })
     } else if (action === 'adopt') {
       const args: Record<string, string> = {}
       if (s(body?.fwPython)) args.fwPython = s(body?.fwPython)!
@@ -50,9 +50,9 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         )
       }
-      res = await bridgeExec('voice_adopt', args)
+      res = await bridgeExec('voice_adopt', args, { origin: 'owner_voice' })
     } else if (action === 'voices') {
-      res = await bridgeExec('voice_voices')
+      res = await bridgeExec('voice_voices', {}, { origin: 'owner_voice' })
     } else {
       // select
       const args: Record<string, string> = {}
@@ -65,7 +65,7 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         )
       }
-      res = await bridgeExec('voice_select', args)
+      res = await bridgeExec('voice_select', args, { origin: 'owner_voice' })
     }
 
     if (!res.ok) {
@@ -85,7 +85,7 @@ export async function POST(req: NextRequest) {
 
 export async function GET() {
   try {
-    const res = await bridgeExec('voice_voices')
+    const res = await bridgeExec('voice_voices', {}, { origin: 'owner_voice' })
     if (!res.ok) {
       return NextResponse.json(
         { ok: false, error: res.error ?? 'bridge action failed', bridgeConnected: res.bridgeConnected },

@@ -44,7 +44,9 @@ export function SkillsTab() {
   }, [])
 
   useEffect(() => {
-    load()
+    // deferred to a macrotask — load() setStates synchronously (setLoadError)
+    const id = window.setTimeout(() => void load(), 0)
+    return () => window.clearTimeout(id)
   }, [load])
 
   // Execution ledger — refresh on mount and whenever the skill filter changes.
@@ -59,7 +61,9 @@ export function SkillsTab() {
   }, [])
 
   useEffect(() => {
-    loadExecutions(selectedSkill)
+    // deferred to a macrotask — loadExecutions() setStates synchronously (setExecutionsError)
+    const id = window.setTimeout(() => void loadExecutions(selectedSkill), 0)
+    return () => window.clearTimeout(id)
   }, [loadExecutions, selectedSkill])
 
   const removeSkill = async (skill: SkillInfo) => {

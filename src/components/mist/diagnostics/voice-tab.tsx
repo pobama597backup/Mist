@@ -41,12 +41,16 @@ export function VoiceTab() {
   useEffect(() => {
     if (voiceEngine !== 'gemini') return
     let alive = true
-    setGeminiProbe('unknown')
-    googleTtsAvailable().then((s) => {
-      if (alive) setGeminiProbe(s)
-    })
+    // deferred to a macrotask — the 'unknown' reset setStates synchronously
+    const id = window.setTimeout(() => {
+      setGeminiProbe('unknown')
+      googleTtsAvailable().then((s) => {
+        if (alive) setGeminiProbe(s)
+      })
+    }, 0)
     return () => {
       alive = false
+      window.clearTimeout(id)
     }
   }, [voiceEngine])
 

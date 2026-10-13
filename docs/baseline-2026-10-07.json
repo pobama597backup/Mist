@@ -1,0 +1,124 @@
+{
+  "mandate": "M.I.S.T. UNIFIED — Phase 0 baseline",
+  "capturedAt": "2026-10-07T23:03:18.121Z",
+  "git": "22f2813",
+  "runtime": "bun (node-compat v24.3.0)",
+  "typescript": {
+    "errors": 0
+  },
+  "eslint": {
+    "files": 294,
+    "errors": 0,
+    "warnings": 0
+  },
+  "tools": {
+    "implemented": 139,
+    "total": 143,
+    "descChars": 28632,
+    "descTokensEst": 7158
+  },
+  "buildContext": {
+    "p50ms": 46,
+    "p95ms": 54,
+    "staticPrefixChars": 19533,
+    "staticPrefixTokensEst": 4883
+  },
+  "routes": {
+    "total": 82,
+    "withGet": 56,
+    "postOnly": 26,
+    "getSmoke": {
+      "sampled": 51,
+      "excluded": [
+        "/api/mist/welcome",
+        "/api/mist/bridge/export",
+        "/api/mist/bridge/download",
+        "/api/mist/google",
+        "/api/mist/llm/unified",
+        "/api/mist/synapse/stream",
+        "/api/mist/voice/tts/stream"
+      ],
+      "p50ms": 101,
+      "p95ms": 231,
+      "non200": [
+        "/api/mist/missions/[id]→404",
+        "/api/mist/obsidian→400",
+        "/api/mist/research/[id]→404",
+        "/api/mist/subagents/[id]→404",
+        "/api/mist/tools/[name]/info→404",
+        "/api/mist/traces/[id]→404"
+      ],
+      "slowest": [
+        "/api/mist/missions 200/282ms",
+        "/api/mist/traces 200/242ms",
+        "/api/mist/telemetry 200/231ms",
+        "/api/mist/subagents 200/210ms",
+        "/api/mist/tools/categories 200/186ms"
+      ]
+    },
+    "llmStubbedMatrix": "SKIPPED — requires LLM stubbing harness (Phase 1)"
+  },
+  "bindAddresses": [
+    "0.0.0.0:3003",
+    "0.0.0.0:3004",
+    "127.0.0.1:8734",
+    "*:3030",
+    "*:3000"
+  ],
+  "uiCounts": {
+    "microType": 797,
+    "backdropBlur": 29,
+    "fullHeight": 8,
+    "safeArea": 0
+  },
+  "dependencies": {
+    "total": 69,
+    "alive": 55,
+    "dead": [
+      "@dnd-kit/core",
+      "@dnd-kit/sortable",
+      "@dnd-kit/utilities",
+      "@hookform/resolvers",
+      "@mdxeditor/editor",
+      "@reactuses/core",
+      "@tanstack/react-query",
+      "@tanstack/react-table",
+      "next-auth",
+      "next-intl",
+      "react-syntax-highlighter",
+      "tailwindcss-animate",
+      "uuid",
+      "zod"
+    ],
+    "usedWithoutImports": [
+      "prisma",
+      "sharp"
+    ]
+  },
+  "firstLoadJs": {
+    "bytes": 13134119,
+    "gzBytes": 1888967,
+    "scripts": 39,
+    "provenance": "dev-server (upper bound of prod)"
+  },
+  "idle60s": {
+    "nextPid": "3085",
+    "cpuPct": 0,
+    "nonLoopbackRxBytes": 304707,
+    "note": "rx bytes on non-lo interfaces with no tab open — background service chatter, not page traffic"
+  },
+  "database": {
+    "models": 26,
+    "indexes": 24,
+    "sizeBytes": 59510784,
+    "walPresent": false,
+    "journalMode": "delete",
+    "longtermMemoryRows": 62
+  },
+  "spendMetrics": {
+    "ttftKeylessX3": "SKIPPED — live LLM spend; Phase 1 red-team run",
+    "candorCorpus": "UNVERIFIED — no local model on this machine (Phase 5)",
+    "heapMountUnmount": "SKIPPED — Phase 3 listener-count invariant (Playwright)",
+    "prodChunks": "SKIPPED — next build banned in this sandbox; dev-server numbers above"
+  }
+}

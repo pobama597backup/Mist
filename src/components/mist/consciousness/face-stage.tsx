@@ -1,18 +1,23 @@
 'use client'
 
-// M.I.S.T. FaceStage (v7) — the consciousness stage as one of the
-// adapted ai-visualizer canvas faces, served from /av/faces/* and fed LIVE by
-// window.__mistBus (installed by useFaceBusEmitter): the face hears, thinks
+// M.I.S.T. FaceStage (v8) — the consciousness stage as one of the
+// adapted ai-visualizer canvas faces, served from /av/faces/* and fed LIVE
+// by the postMessage face bus (src/lib/face-bus.ts): the face hears, thinks
 // and speaks with Mist's real voice state and real waveform.
 //
-// The iframes are same-origin, so the shim injected into each face reads the
-// parent's bus directly. F/S/C key handling (fullscreen / cinematic camera)
-// works inside the iframe once it has focus. While the in-app browser window
-// is open the face docks top-right exactly like the orb does.
+// Phase 6-b: the frames now carry the FULL SANDBOX — allow-scripts ONLY,
+// no same-origin grant. Each face is an opaque-origin document that cannot
+// touch this window's DOM, cookies or storage even if a face's canvas code
+// were ever compromised; the bus rides window.parent.postMessage (strict
+// origin target) answered on a private MessagePort, so nothing the faces
+// need was lost. F/S/C key handling (fullscreen / cinematic camera) works
+// inside the iframe once it has focus. While the in-app browser window is
+// open the face docks top-right exactly like the orb does.
 
 import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import type { ConsciousnessFace } from '@/lib/types'
+import { attachFaceFrame, detachFaceFrame } from '@/lib/face-bus'
 import { useMistStore } from '@/lib/store'
 import { cn } from '@/lib/utils'
 
@@ -72,6 +77,18 @@ export function FaceStage({
     return () => el.removeEventListener('load', focus)
   }, [face])
 
+  // Phase 6-b: register this frame's contentWindow with the postMessage
+  // face bus BEFORE its document can boot (the transport's hello arrives
+  // when the face's core.js evals). The window proxy is stable across the
+  // frame's navigations, so attaching this early is safe and covers face
+  // swaps without remounts; the effect cleanup closes the frame's bus port.
+  useEffect(() => {
+    const win = frameRef.current?.contentWindow
+    if (!win) return
+    attachFaceFrame(win)
+    return () => detachFaceFrame(win)
+  }, [face])
+
   return (
     <motion.div
       layout={reduced ? false : true}
@@ -103,6 +120,18 @@ export function FaceStage({
         onLoad={() => setLoaded(true)}
         allow="microphone"
         allowFullScreen
+        // Phase 6-b · TRUE SANDBOX (resolves the Phase 1 S12 backlog note:
+        // "postMessage bus migration unlocks a true sandbox"). allow-scripts
+        // ONLY — deliberately WITHOUT a same-origin grant: the faces ride
+        // the postMessage bus now (face-bus.ts), so they need no
+        // same-origin access to this window. Each frame is an
+        // opaque-origin document — it cannot touch the parent DOM, cookies
+        // or storage, and a compromised face stays inside its own box. CSP
+        // frame-src 'self' still governs which URLs may load here; referrer
+        // stays sealed. (The literal token the test bans never appears in
+        // this file — keep it that way.)
+        sandbox="allow-scripts"
+        referrerPolicy="no-referrer"
         className={cn(
           'h-full w-full border-0 bg-black transition-opacity duration-700',
           loaded ? 'opacity-100' : 'opacity-0'

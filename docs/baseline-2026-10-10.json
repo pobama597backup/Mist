@@ -1,0 +1,824 @@
+{
+  "date": "2026-10-10T07:30:42.434Z",
+  "git": {
+    "sha": "22f2813",
+    "branch": "main",
+    "dirtyFiles": 36
+  },
+  "machine": {
+    "memTotalMb": 4042,
+    "loadavg": "0.01 0.02 0.00"
+  },
+  "constraints": [
+    "next build banned in sandbox (dev server owns .next) — bundle = dev-mode first-load payload",
+    "route timings: read-only GET subset only; POST/side-effect/SSE/secret routes skipped and listed",
+    "idle outbound sampled 60s (6x10s) not 5min — sandbox session budget",
+    "tsc runs as a separate --tsc pass to isolate its memory footprint"
+  ],
+  "configFlags": {
+    "nextConfig": {
+      "ignoreBuildErrors": true,
+      "reactStrictMode": false,
+      "outputStandalone": true
+    },
+    "eslint": {
+      "rulesOff": 27
+    },
+    "packageJson": {
+      "dbPushAcceptDataLoss": true,
+      "name": "nextjs_tailwind_shadcn_ts"
+    }
+  },
+  "repoCounts": {
+    "routes": {
+      "total": 83,
+      "underMist": 82
+    },
+    "tests": 0,
+    "runtimeSkills": {
+      "mdFiles": 18,
+      "names": [
+        "system-status-with-weather.md",
+        "agent-skills-integration.md",
+        "self-review-report.md",
+        "optimal-model-selector.md",
+        "security-threat-monitor.md",
+        "research-ai-agents.md",
+        "hermes-operator.md",
+        "research-first.md",
+        "quick-math.md",
+        "count-images-downloads.md",
+        "gpt6-luna-evaluator.md",
+        "exec-proof.md",
+        "adaptive-model-selector.md",
+        "generate-self-review-report.md",
+        "system-health-check.md",
+        "get-latest-version.md",
+        "read-package-version.md",
+        "pdf-extract.md"
+      ]
+    },
+    "prisma": {
+      "models": 26,
+      "indexDirectives": 24,
+      "uniqueDirectives": 0
+    },
+    "gitignore": {
+      "missesDbFiles": true,
+      "missesDbBackups": true,
+      "missesDbNotes": true,
+      "trackedDbFiles": 151,
+      "trackedSecretFiles": [
+        "db/custom.db",
+        "db/provider-keys.json"
+      ]
+    }
+  },
+  "deadDeps": {
+    "@mdxeditor/editor": {
+      "imports": 0,
+      "verdict": "DEAD — safe to remove"
+    },
+    "@dnd-kit/core": {
+      "imports": 0,
+      "verdict": "DEAD — safe to remove"
+    },
+    "@dnd-kit/sortable": {
+      "imports": 0,
+      "verdict": "DEAD — safe to remove"
+    },
+    "@dnd-kit/utilities": {
+      "imports": 0,
+      "verdict": "DEAD — safe to remove"
+    },
+    "@tanstack/react-query": {
+      "imports": 0,
+      "verdict": "DEAD — safe to remove"
+    },
+    "@tanstack/react-table": {
+      "imports": 0,
+      "verdict": "DEAD — safe to remove"
+    },
+    "@reactuses/core": {
+      "imports": 0,
+      "verdict": "DEAD — safe to remove"
+    },
+    "next-auth": {
+      "imports": 0,
+      "verdict": "DEAD — safe to remove"
+    },
+    "next-intl": {
+      "imports": 0,
+      "verdict": "DEAD — safe to remove"
+    },
+    "react-syntax-highlighter": {
+      "imports": 0,
+      "verdict": "DEAD — safe to remove"
+    },
+    "uuid": {
+      "imports": 0,
+      "verdict": "DEAD — safe to remove"
+    },
+    "zod": {
+      "imports": 0,
+      "verdict": "DEAD — safe to remove"
+    },
+    "sharp": {
+      "imports": 0,
+      "verdict": "KEEP — next/image prod optimizer (0 direct imports)"
+    }
+  },
+  "uiCost": {
+    "text9px": 195,
+    "text10px": 450,
+    "text11px": 152,
+    "textSmallTotal": 797,
+    "backdropBlurDirect": 26,
+    "mistGlassUsages": 156,
+    "vh100": 5,
+    "dvh": 0,
+    "safeArea": 0,
+    "topOffendersTextSmall": [
+      "src/components/mist/settings/settings-view.tsx: 94",
+      "src/components/mist/diagnostics/evolution-tab.tsx: 62",
+      "src/components/mist/self/self-view.tsx: 60",
+      "src/components/mist/diagnostics/upstream-tab.tsx: 57",
+      "src/components/mist/diagnostics/vault-tab.tsx: 47",
+      "src/components/mist/consciousness/chat-panel.tsx: 32",
+      "src/components/mist/diagnostics/traces-tab.tsx: 31",
+      "src/components/mist/diagnostics/knowledge-tab.tsx: 25"
+    ]
+  },
+  "toolsList": {
+    "payloadBytes": 67481,
+    "count": 143,
+    "implemented": 139,
+    "descChars": 28632,
+    "approxTokensDescOnly": 7158,
+    "approxTokensFullBlock": 13799,
+    "largest": [
+      "mission_start: 1396c",
+      "ui_automate: 1061c",
+      "owner_files: 1046c",
+      "mist_self_read: 912c",
+      "run_in_background: 882c"
+    ]
+  },
+  "devBundle": {
+    "method": "dev-mode first-load payload (NOT production build — see constraints)",
+    "scriptsReferenced": 39,
+    "firstLoadJsRaw": 13134119,
+    "firstLoadJsGzip": 1888945,
+    "nextStaticDiskBytes": 0
+  },
+  "buildContext": {
+    "p50ms": 77.89,
+    "p95ms": 222.32,
+    "minMs": 47,
+    "samples": [
+      78,
+      72,
+      102,
+      222,
+      89,
+      96,
+      55,
+      50,
+      47,
+      50
+    ],
+    "promptChars": 62506,
+    "promptApproxTokens": 15627,
+    "toolsBlockChars": 38122,
+    "toolsBlockApproxTokens": 9531
+  },
+  "routeLatency": {
+    "method": "read-only GET subset (dev-mode; cold = first-hit incl. on-demand compile)",
+    "probed": 41,
+    "skipped": [
+      "/api/mist/welcome (GET has side-effect seen-gate)",
+      "/api/mist/recover (kills processes — do not probe)",
+      "/api/mist/google (returns GEMINI_API_KEY)",
+      "/api/mist/synapse/stream (SSE long-lived)",
+      "/api/mist/voice/tts/stream (SSE)",
+      "/api/mist/evolution/scan (side-effecting scan)",
+      "all POST-only routes (LLM/writes)",
+      "all [id] dynamic routes (need params)"
+    ],
+    "aggregateP50ms": 6,
+    "aggregateP95ms": 9,
+    "slowest": [
+      "/api/mist/missions p95=165ms cold=80ms status=200",
+      "/api/mist/health p95=66ms cold=67ms status=200",
+      "/api/mist/learning p95=30ms cold=206ms status=200",
+      "/api/mist/voice/status p95=30ms cold=591ms status=200",
+      "/api/mist/watchlist p95=26ms cold=236ms status=200",
+      "/api/mist/data-boundary p95=25ms cold=102ms status=200"
+    ],
+    "routes": {
+      "/api/mist/health": {
+        "coldMs": 67,
+        "status": 200,
+        "p50ms": 53,
+        "p95ms": 66,
+        "warmMs": [
+          66,
+          48,
+          58,
+          49,
+          53
+        ]
+      },
+      "/api/mist/tools/list": {
+        "coldMs": 12,
+        "status": 200,
+        "p50ms": 10,
+        "p95ms": 11,
+        "warmMs": [
+          11,
+          10,
+          11,
+          10,
+          10
+        ]
+      },
+      "/api/mist/tools/categories": {
+        "coldMs": 143,
+        "status": 200,
+        "p50ms": 5,
+        "p95ms": 5,
+        "warmMs": [
+          5,
+          5,
+          5,
+          5,
+          4
+        ]
+      },
+      "/api/mist/skills/list": {
+        "coldMs": 220,
+        "status": 200,
+        "p50ms": 7,
+        "p95ms": 13,
+        "warmMs": [
+          13,
+          7,
+          7,
+          6,
+          6
+        ]
+      },
+      "/api/mist/skills/executions": {
+        "coldMs": 169,
+        "status": 200,
+        "p50ms": 7,
+        "p95ms": 19,
+        "warmMs": [
+          8,
+          6,
+          7,
+          6,
+          19
+        ]
+      },
+      "/api/mist/missions": {
+        "coldMs": 80,
+        "status": 200,
+        "p50ms": 72,
+        "p95ms": 165,
+        "warmMs": [
+          95,
+          165,
+          70,
+          71,
+          72
+        ]
+      },
+      "/api/mist/memory/stats": {
+        "coldMs": 102,
+        "status": 200,
+        "p50ms": 6,
+        "p95ms": 7,
+        "warmMs": [
+          7,
+          6,
+          6,
+          6,
+          6
+        ]
+      },
+      "/api/mist/llm/lanes": {
+        "coldMs": 93,
+        "status": 200,
+        "p50ms": 4,
+        "p95ms": 5,
+        "warmMs": [
+          4,
+          4,
+          5,
+          4,
+          4
+        ]
+      },
+      "/api/mist/llm/status": {
+        "coldMs": 6,
+        "status": 200,
+        "p50ms": 5,
+        "p95ms": 5,
+        "warmMs": [
+          5,
+          5,
+          4,
+          5,
+          5
+        ]
+      },
+      "/api/mist/telemetry": {
+        "coldMs": 210,
+        "status": 200,
+        "p50ms": 4,
+        "p95ms": 6,
+        "warmMs": [
+          6,
+          5,
+          4,
+          4,
+          4
+        ]
+      },
+      "/api/mist/traces": {
+        "coldMs": 111,
+        "status": 200,
+        "p50ms": 9,
+        "p95ms": 12,
+        "warmMs": [
+          9,
+          9,
+          12,
+          9,
+          10
+        ]
+      },
+      "/api/mist/dreams": {
+        "coldMs": 148,
+        "status": 200,
+        "p50ms": 6,
+        "p95ms": 9,
+        "warmMs": [
+          6,
+          9,
+          6,
+          6,
+          6
+        ]
+      },
+      "/api/mist/agents": {
+        "coldMs": 259,
+        "status": 200,
+        "p50ms": 5,
+        "p95ms": 6,
+        "warmMs": [
+          6,
+          5,
+          6,
+          4,
+          4
+        ]
+      },
+      "/api/mist/subagents": {
+        "coldMs": 8,
+        "status": 200,
+        "p50ms": 6,
+        "p95ms": 6,
+        "warmMs": [
+          6,
+          6,
+          6,
+          6,
+          6
+        ]
+      },
+      "/api/mist/companions": {
+        "coldMs": 111,
+        "status": 200,
+        "p50ms": 8,
+        "p95ms": 10,
+        "warmMs": [
+          10,
+          8,
+          8,
+          10,
+          8
+        ]
+      },
+      "/api/mist/watchlist": {
+        "coldMs": 236,
+        "status": 200,
+        "p50ms": 6,
+        "p95ms": 26,
+        "warmMs": [
+          7,
+          6,
+          6,
+          6,
+          26
+        ]
+      },
+      "/api/mist/autonomy": {
+        "coldMs": 13,
+        "status": 200,
+        "p50ms": 12,
+        "p95ms": 14,
+        "warmMs": [
+          14,
+          12,
+          12,
+          12,
+          12
+        ]
+      },
+      "/api/mist/operators": {
+        "coldMs": 169,
+        "status": 200,
+        "p50ms": 9,
+        "p95ms": 10,
+        "warmMs": [
+          10,
+          8,
+          9,
+          9,
+          8
+        ]
+      },
+      "/api/mist/connectors": {
+        "coldMs": 134,
+        "status": 200,
+        "p50ms": 10,
+        "p95ms": 18,
+        "warmMs": [
+          18,
+          14,
+          10,
+          9,
+          10
+        ]
+      },
+      "/api/mist/introspection": {
+        "coldMs": 172,
+        "status": 200,
+        "p50ms": 6,
+        "p95ms": 7,
+        "warmMs": [
+          6,
+          7,
+          5,
+          5,
+          6
+        ]
+      },
+      "/api/mist/alerts": {
+        "coldMs": 42,
+        "status": 200,
+        "p50ms": 11,
+        "p95ms": 11,
+        "warmMs": [
+          11,
+          11,
+          10,
+          11,
+          11
+        ]
+      },
+      "/api/mist/approvals": {
+        "coldMs": 7,
+        "status": 200,
+        "p50ms": 6,
+        "p95ms": 10,
+        "warmMs": [
+          7,
+          6,
+          6,
+          6,
+          10
+        ]
+      },
+      "/api/mist/conversations": {
+        "coldMs": 6,
+        "status": 200,
+        "p50ms": 5,
+        "p95ms": 7,
+        "warmMs": [
+          5,
+          5,
+          7,
+          5,
+          6
+        ]
+      },
+      "/api/mist/digest": {
+        "coldMs": 151,
+        "status": 200,
+        "p50ms": 7,
+        "p95ms": 9,
+        "warmMs": [
+          7,
+          7,
+          9,
+          6,
+          7
+        ]
+      },
+      "/api/mist/trends": {
+        "coldMs": 201,
+        "status": 200,
+        "p50ms": 12,
+        "p95ms": 14,
+        "warmMs": [
+          11,
+          12,
+          11,
+          12,
+          14
+        ]
+      },
+      "/api/mist/research": {
+        "coldMs": 112,
+        "status": 200,
+        "p50ms": 4,
+        "p95ms": 4,
+        "warmMs": [
+          4,
+          4,
+          4,
+          4,
+          4
+        ]
+      },
+      "/api/mist/evolution": {
+        "coldMs": 35,
+        "status": 200,
+        "p50ms": 11,
+        "p95ms": 12,
+        "warmMs": [
+          11,
+          12,
+          11,
+          11,
+          12
+        ]
+      },
+      "/api/mist/github": {
+        "coldMs": 95,
+        "status": 200,
+        "p50ms": 6,
+        "p95ms": 7,
+        "warmMs": [
+          7,
+          6,
+          6,
+          5,
+          6
+        ]
+      },
+      "/api/mist/obsidian": {
+        "coldMs": 98,
+        "status": 400,
+        "p50ms": null,
+        "p95ms": null,
+        "warmMs": []
+      },
+      "/api/mist/browser/status": {
+        "coldMs": 89,
+        "status": 200,
+        "p50ms": 6,
+        "p95ms": 9,
+        "warmMs": [
+          7,
+          6,
+          6,
+          9,
+          6
+        ]
+      },
+      "/api/mist/bridge": {
+        "coldMs": 89,
+        "status": 200,
+        "p50ms": 6,
+        "p95ms": 6,
+        "warmMs": [
+          6,
+          6,
+          6,
+          6,
+          6
+        ]
+      },
+      "/api/mist/hermes": {
+        "coldMs": 95,
+        "status": 200,
+        "p50ms": 5,
+        "p95ms": 5,
+        "warmMs": [
+          5,
+          4,
+          5,
+          5,
+          4
+        ]
+      },
+      "/api/mist/learning": {
+        "coldMs": 206,
+        "status": 200,
+        "p50ms": 5,
+        "p95ms": 30,
+        "warmMs": [
+          30,
+          6,
+          5,
+          5,
+          5
+        ]
+      },
+      "/api/mist/analytics/efficiency": {
+        "coldMs": 101,
+        "status": 200,
+        "p50ms": 7,
+        "p95ms": 7,
+        "warmMs": [
+          7,
+          6,
+          7,
+          7,
+          6
+        ]
+      },
+      "/api/mist/cron": {
+        "coldMs": 149,
+        "status": 200,
+        "p50ms": 6,
+        "p95ms": 6,
+        "warmMs": [
+          6,
+          6,
+          6,
+          5,
+          6
+        ]
+      },
+      "/api/mist/mesh": {
+        "coldMs": 103,
+        "status": 200,
+        "p50ms": 6,
+        "p95ms": 7,
+        "warmMs": [
+          7,
+          7,
+          6,
+          6,
+          6
+        ]
+      },
+      "/api/mist/data-boundary": {
+        "coldMs": 102,
+        "status": 200,
+        "p50ms": 12,
+        "p95ms": 25,
+        "warmMs": [
+          12,
+          12,
+          12,
+          14,
+          25
+        ]
+      },
+      "/api/mist/voice/status": {
+        "coldMs": 591,
+        "status": 200,
+        "p50ms": 6,
+        "p95ms": 30,
+        "warmMs": [
+          30,
+          6,
+          5,
+          6,
+          6
+        ]
+      },
+      "/api/mist/voice/local/status": {
+        "coldMs": 19,
+        "status": 200,
+        "p50ms": 7,
+        "p95ms": 8,
+        "warmMs": [
+          8,
+          7,
+          7,
+          6,
+          7
+        ]
+      },
+      "/api/mist/voice/local/engines": {
+        "coldMs": 98,
+        "status": 200,
+        "p50ms": 7,
+        "p95ms": 8,
+        "warmMs": [
+          8,
+          8,
+          6,
+          7,
+          7
+        ]
+      },
+      "/api": {
+        "coldMs": 85,
+        "status": 200,
+        "p50ms": 4,
+        "p95ms": 5,
+        "warmMs": [
+          4,
+          4,
+          4,
+          5,
+          4
+        ]
+      }
+    }
+  },
+  "binds": {
+    "listeners": [
+      "LISTEN 0 512 0.0.0.0:3003 0.0.0.0:* users:((\"bun\",pid=1392,fd=75))",
+      "LISTEN 0 512 0.0.0.0:3004 0.0.0.0:* users:((\"bun\",pid=1378,fd=21))",
+      "LISTEN 0 512 127.0.0.1:8734 0.0.0.0:* users:((\"node\",pid=1479,fd=11))",
+      "LISTEN 0 512 *:3030 *:* users:((\"bun\",pid=1400,fd=78))",
+      "LISTEN 0 511 *:3000 *:* users:((\"next-server (v1\",pid=1096,fd=22))"
+    ],
+    "localModels": {
+      "ollama": {
+        "present": false,
+        "port": 11434
+      },
+      "lmstudio": {
+        "present": false,
+        "port": 1234
+      },
+      "llamacpp": {
+        "present": false,
+        "port": 8080
+      }
+    }
+  },
+  "idle": {
+    "method": "CPU: 10s /proc stat of next-server; outbound: 6x10s ss established (non-loopback, our pids)",
+    "nextServerPid": "1096",
+    "nextServerCpuPctOver10s": 0.43,
+    "idleOutbound": {
+      "snapshots": 6,
+      "totalNonLoopbackConns": 0,
+      "perSnapshot": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "sample": []
+    }
+  },
+  "unverified": {
+    "buildTime": {
+      "status": "UNVERIFIED",
+      "reason": "next build banned in sandbox — measure on owner PC",
+      "method": "bun run build on PC, record duration"
+    },
+    "productionBundle": {
+      "status": "UNVERIFIED",
+      "reason": "next build banned in sandbox — dev-mode proxy recorded in devBundle",
+      "method": "compare .next/standalone + analyzer on PC"
+    },
+    "ttftKeyless": {
+      "status": "UNVERIFIED",
+      "reason": "live keyless-lane round trip needs external egress; sandbox egress restricted",
+      "method": "on PC: 3x unified() on a keyless lane, record first-token ms"
+    },
+    "candorCorpus": {
+      "status": "UNVERIFIED",
+      "reason": "no local model present (probed in binds.localModels)",
+      "method": "C5 harness after Phase 5 wizard"
+    },
+    "heap20MountUnmount": {
+      "status": "UNVERIFIED",
+      "reason": "needs a Playwright heap harness (Phase 3 instrumentation work)",
+      "method": "mount/unmount chat-panel 20x, record JSHeapUsedSize deltas"
+    }
+  },
+  "harnessDurationMs": 79083,
+  "tsc": {
+    "exitCode": 0,
+    "errorCount": 0,
+    "durationMs": 14280,
+    "verdict": "CLEAN (0 errors)",
+    "outputTail": ""
+  }
+}

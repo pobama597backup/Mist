@@ -25,7 +25,7 @@ export async function GET(): Promise<NextResponse> {
     if (!status.connected) {
       return NextResponse.json({ ok: true, connected: false, companions: null })
     }
-    const res = await bridgeExec('companions')
+    const res = await bridgeExec('companions', {}, { origin: 'skill' }) // Phase 2-b: companion-sourced scan
     const companions =
       res.ok && res.data && typeof res.data === 'object'
         ? (res.data as Record<string, unknown>)
@@ -65,7 +65,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   if (action === 'signal_setup') {
     const dir = typeof body.dir === 'string' && body.dir.trim() ? body.dir.trim() : undefined
-    const res = await bridgeExec('signal_setup', dir ? { dir } : {})
+    const res = await bridgeExec('signal_setup', dir ? { dir } : {}, { origin: 'skill' })
     return NextResponse.json({ ok: res.ok, result: res.data ?? null, error: res.error })
   }
 
@@ -75,7 +75,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ ok: false, error: 'bridge-offline' }, { status: 200 })
     }
     // perform: thinking → speaking (with live waveform ~4Hz for 4s) → idle
-    const emit = (args: Record<string, unknown>) => bridgeExec('signal_emit', args)
+    const emit = (args: Record<string, unknown>) => bridgeExec('signal_emit', args, { origin: 'skill' })
     await emit({ state: 'thinking' })
     await new Promise((r) => setTimeout(r, 1200))
     const started = Date.now()

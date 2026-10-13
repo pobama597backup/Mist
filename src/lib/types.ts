@@ -41,6 +41,7 @@ export type ProviderId =
   | 'llm7'
   | 'ovh'
   | 'core'
+  | 'local' // Phase 5 · C4 — the owner's own Ollama/LM Studio/llama.cpp lane (loopback by rule)
   | 'offline-mind'
   | 'mist-instant' // w3: instant fast-path (canned smalltalk / cached reply / direct status) — zero cascade
 
@@ -144,6 +145,31 @@ export interface MemoryStats {
   longterm_count: number
   queue_count: number
   vector_count: number
+}
+
+// Phase 2-c — the S11 quarantine inbox (tainted internal auto-writes awaiting
+// the owner's accept/edit/drop; never injected into recall until accepted)
+export interface QuarantineItemView {
+  id: string
+  kind: 'fact' | 'skill' | 'cron' | 'persona' | string
+  contentJson: string
+  source: string
+  reason: string
+  turnId: string | null
+  status: 'pending' | 'accepted' | 'edited' | 'dropped' | string
+  createdAt: string
+  decidedAt: string | null
+}
+
+export interface QuarantineListResponse {
+  pending: QuarantineItemView[]
+  counts: { pending: number; accepted: number; edited: number; dropped: number }
+}
+
+export interface QuarantineDecideResponse {
+  ok: boolean
+  item?: { id: string; kind: string; status: string }
+  error?: string
 }
 
 export interface VoiceStatus {
@@ -290,6 +316,13 @@ export interface UnifiedLlmRequest {
    * {type:'activity'} line per thing she is doing, then {type:'result'}.
    * Opt-in so every existing JSON caller keeps its contract. */
   stream?: boolean
+  /** Phase 2-b Arbiter origin for every tool call this turn makes
+   *  (owner_chat | owner_voice | owner_cron | owner_heartbeat …);
+   *  anything unrecognized falls back to owner_chat. */
+  origin?: string
+  /** false for unattended callers (cron/welcome/heartbeat) — the Arbiter
+   *  queues their side effects for owner review instead of asking live. */
+  interactive?: boolean
 }
 
 export interface SkillHint {
@@ -324,6 +357,17 @@ export interface UnifiedLlmResponse {
   suggestions?: string[]
   capability_request?: CapabilityRequest | null
   remembered?: string[]
+  /** Phase 2-d · S13: true when a sensitive-read tool result was REDACTED
+   *  from this turn's prompt copy (credential shapes scrubbed before any
+   *  lane saw it). Phase 5's Frank/Unfiltered dial consumes this flag to pin
+   *  such turns to local lanes unless the owner consents per-turn. */
+  cloudConsent?: boolean
+  /** Phase 5 · C2: the candor dial this turn ran under (conversation
+   *  override → global setting → 'standard'). */
+  candorMode?: 'standard' | 'frank' | 'unfiltered'
+  /** Phase 5 · C3: set when a refusal-shaped reply was rerouted once to a
+   *  local lane and IT served the turn (the provider badge shows the truth). */
+  refusalReroute?: { from: ProviderId; to: ProviderId; pattern: string }
 }
 
 // ---------- v2 agent-grade structures ----------
@@ -602,6 +646,8 @@ export interface BridgeStatus {
   platform?: string
   hostname?: string
   checkedAt: number
+  /** Phase 1: daemon up but bearer token rejected — honest, never folded into "disconnected". */
+  authError?: string
 }
 
 /** Result of one bridge action; bridgeConnected distinguishes daemon-down from action failure. */

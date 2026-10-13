@@ -313,8 +313,16 @@ export function EvolutionTab() {
   }, [])
 
   useEffect(() => {
-    const cleanup = reload()
-    return cleanup
+    // deferred to a macrotask — reload() setStates synchronously (setData(null));
+    // the inner alive-cleanup still runs whenever the deferred reload fired
+    let cleanup: (() => void) | null = null
+    const id = window.setTimeout(() => {
+      cleanup = reload()
+    }, 0)
+    return () => {
+      window.clearTimeout(id)
+      cleanup?.()
+    }
   }, [reload, reloadKey])
 
   // watchlist + heartbeat freshness (v4)

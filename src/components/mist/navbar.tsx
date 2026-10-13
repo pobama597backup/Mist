@@ -236,7 +236,7 @@ export function MistNavbar() {
             <span className="text-sm font-semibold tracking-[0.2em] text-slate-100 sm:tracking-[0.25em]">
               M.I.S.T.
             </span>
-            <span className="hidden font-mono text-[10px] tracking-widest text-slate-500 lg:block">
+            <span className="hidden font-mono text-[10px] tracking-[0.18em] text-slate-400 lg:block">
               MASTER INTELLIGENCE &amp; SYSTEM TOPOLOGY
             </span>
           </div>
@@ -270,8 +270,9 @@ export function MistNavbar() {
             <TooltipContent side="bottom">neural link</TooltipContent>
           </Tooltip>
 
-          {/* primary view tabs */}
-          <nav aria-label="Primary views" className="flex shrink-0 items-center gap-0.5 md:gap-1">
+          {/* primary view tabs — one segmented control group (ui-5+6b), so
+              the pills read as a single unit instead of loose floating chips */}
+          <nav aria-label="Primary views" className="mist-glass-soft flex shrink-0 items-center gap-0.5 rounded-xl p-1 md:gap-1">
             {VIEW_TABS.map(({ id, label, icon: Icon }) => {
               const active = view === id
               return (

@@ -90,6 +90,113 @@ const AV = (() => {
 
   A.ready = cb => { A._ready ? cb(A) : A._readyCbs.push(cb); };
 
+  /* ---------------- M.I.S.T. embed transport (postMessage) ----------------
+   * Added for the Mist web app (Phase 6-b sandbox migration). The Mist app
+   * embeds every /av/faces/* frame with sandbox="allow-scripts" and NO
+   * allow-same-origin — these frames are OPAQUE-ORIGIN documents — so the
+   * old same-origin shim (window.parent.__mistBus) is gone. When this face
+   * IS embedded in Mist, the /state and /config polls below are answered
+   * LIVE by the parent app over a strict postMessage protocol instead of
+   * the network, so the face performs Mist's real voice state. Opened
+   * standalone, nothing changes (real network fetches, exactly as before).
+   *
+   * The ONLY thing this transport ever touches on window.parent is
+   * postMessage — no parent DOM access of any kind.
+   *
+   * Protocol (mirrors src/lib/face-bus.ts; marker "__mistFace"):
+   *   boot : create a MessageChannel and transfer port2 to the parent with
+   *          a "hello" (window.parent.postMessage, STRICT targetOrigin —
+   *          the parent's origin derived from this document's own URL, so
+   *          a hostile embedder hosting this file never receives anything).
+   *   ask  : window.parent.postMessage({__mistFace, type, seq}) — the
+   *          parent's answer arrives on our port1 as {__mistFace, type,
+   *          seq, payload}, computed fresh per request exactly like the v7
+   *          synchronous bus (level freshness, live mouth frames, all of it).
+   *   bail : no hello-ack within MIST_GIVE_UP_MS → standalone forever (the
+   *          fetch override stays off and the real network talks).
+   * Faces + core.js are from github.com/jaredrhod/ai-visualizer (AGPL-3.0).
+   * ------------------------------------------------------------------------ */
+  var MIST = {
+    marker: "__mistFace",
+    origin: null,        // strict postMessage target = the parent's origin
+    port: null,          // port1 — the parent's answers arrive here
+    acked: false,        // hello-ack seen → the fetch override activates
+    gaveUp: false,       // no Mist parent → standalone behavior, unchanged
+    seq: 0,
+    pending: new Map(),  // seq -> {resolve, timer}
+  };
+  var MIST_TIMEOUT = 1000, MIST_GIVE_UP = 1800;
+  try {
+    // location.origin reads "null" inside a sandboxed frame, but
+    // location.href still carries the real serving URL — derive the
+    // parent's origin from it (the faces are same-app public/ files).
+    MIST.origin = new URL("/", location.href).origin;
+  } catch (e) { MIST.origin = null; }
+
+  function mistResolve(seq, payload) {
+    var p = MIST.pending.get(seq);
+    if (!p) return;
+    MIST.pending.delete(seq);
+    clearTimeout(p.timer);
+    p.resolve(payload);
+  }
+
+  function mistOnPort(e) {
+    var d = e && e.data;
+    if (!d || typeof d !== "object" || d[MIST.marker] !== true) return;
+    if (d.type === "hello-ack") { MIST.acked = true; return; }
+    if (d.type !== "state" && d.type !== "config") return;
+    if (typeof d.seq !== "number") return;
+    mistResolve(d.seq, d.payload || {});
+  }
+
+  function mistHello() {
+    if (MIST.gaveUp || MIST.port) return;
+    if (!window.parent || window.parent === window) return;
+    if (!MIST.origin || MIST.origin === "null") { MIST.gaveUp = true; return; }
+    try {
+      var ch = new MessageChannel();
+      ch.port1.onmessage = mistOnPort;   // assigning onmessage implies start()
+      MIST.port = ch.port1;
+      // STRICT origin target — never "*". If the parent is not the Mist
+      // app (wrong origin) the browser silently drops this and we degrade
+      // to standalone, which is exactly the honest behavior.
+      window.parent.postMessage({ [MIST.marker]: true, type: "hello" },
+                                MIST.origin, [ch.port2]);
+    } catch (e) { MIST.port = null; }
+  }
+  mistHello();
+  setTimeout(mistHello, 350);
+  setTimeout(mistHello, 900);
+  setTimeout(function () { if (!MIST.acked) MIST.gaveUp = true; }, MIST_GIVE_UP);
+
+  // Intercept the /state + /config fetches ONLY while the Mist bus is live
+  // (same URL matching the v7 shim used). Everything else — and every
+  // fetch a standalone face makes — goes to the real network untouched.
+  var realFetch = window.fetch.bind(window);
+  window.fetch = function (url, opts) {
+    var u = String(url), kind = null;
+    if (u.indexOf("/state") !== -1) kind = "state";
+    else if (u.indexOf("/config") !== -1) kind = "config";
+    if (!kind || !MIST.acked || MIST.gaveUp) return realFetch(url, opts);
+    return new Promise(function (resolve, reject) {
+      var seq = ++MIST.seq;
+      var t = setTimeout(function () {
+        if (MIST.pending.delete(seq))
+          reject(new Error("mist bus timeout"));   // == a dead server: hold state
+      }, MIST_TIMEOUT);
+      MIST.pending.set(seq, {
+        resolve: function (payload) {
+          resolve(new Response(JSON.stringify(payload),
+            { headers: { "Content-Type": "application/json" } }));
+        },
+        timer: t,
+      });
+      window.parent.postMessage({ [MIST.marker]: true, type: kind, seq: seq },
+                                MIST.origin);
+    });
+  };
+
   /* ------------------------------ bus polling ------------------------------ */
   let raw = { state: "idle", level: 0, samples: null, alert: false,
               loading: false };

@@ -94,8 +94,12 @@ export function NousSection({
 
   useEffect(() => {
     if (!info) return
-    setModelSel(info.selected.text)
-    setBaseUrl(baseUrlValue || info.base_url || DEFAULT_BASE)
+    // deferred to a macrotask — syncing model/baseUrl setStates synchronously
+    const id = window.setTimeout(() => {
+      setModelSel(info.selected.text)
+      setBaseUrl(baseUrlValue || info.base_url || DEFAULT_BASE)
+    }, 0)
+    return () => window.clearTimeout(id)
   }, [info, baseUrlValue])
 
   const savedBase = baseUrlValue || info?.base_url || DEFAULT_BASE

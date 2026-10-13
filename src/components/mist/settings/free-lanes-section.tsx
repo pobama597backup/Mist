@@ -343,7 +343,9 @@ export function FreeLanesSection({
   }, [])
 
   useEffect(() => {
-    void fetchLanes()
+    // deferred to a macrotask — fetchLanes() setStates synchronously (setLoading)
+    const id = window.setTimeout(() => void fetchLanes(), 0)
+    return () => window.clearTimeout(id)
   }, [fetchLanes, refreshKey])
 
   return (

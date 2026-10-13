@@ -8,6 +8,7 @@
 'use client'
 
 import { useMistStore } from './store'
+import { useAudioSession } from './audio-session'
 import { mistApi } from './mist-api'
 import { mistAudioResume, mistAudioAttachMedia } from './audio-bus'
 import { resolveVoiceMode, type ResolvedVoiceMode } from './services/voice-local'
@@ -285,60 +286,49 @@ let currentAudio: HTMLAudioElement | null = null
 let currentUrl: string | null = null
 let speakSeq = 0
 
-/** w9 interruption polish: ramp a mid-playback element down over ~120ms
- *  before pausing — the creator hears her stop cleanly instead of a harsh
- *  clip when they cut in. Fire-and-forget: ownership state (currentAudio /
- *  currentUrl) is already cleared by then, the element pauses itself, and a
- *  superseding utterance's synthesis always takes longer than the fade, so
- *  the tail can never overlap the next reply. Natural endings (paused /
- *  ended elements) skip the ramp entirely. */
-function fadeOutAndPause(audio: HTMLAudioElement) {
-  try {
-    if (audio.paused || audio.ended) return
-    const steps = 8 // ~120ms total — under the ~200ms turn-gap perceptual floor
-    const stepMs = 15
-    const vol0 = audio.volume
-    let i = 0
-    const timer = window.setInterval(() => {
-      i += 1
-      if (i >= steps) {
-        window.clearInterval(timer)
-        try {
-          audio.pause()
-        } catch {
-          /* already gone */
-        }
-        return
-      }
-      try {
-        audio.volume = Math.max(0, vol0 * (1 - i / steps))
-      } catch {
-        window.clearInterval(timer) // element torn down mid-fade — let it go
-      }
-    }, stepMs)
-  } catch {
-    try {
-      audio.pause()
-    } catch {
-      /* already gone */
-    }
-  }
-}
-
 function cleanupAudio() {
   if (currentAudio) {
     currentAudio.onended = null
     currentAudio.onerror = null
     currentAudio.onpause = null
-    // w9: smooth cancellation — fade the audible tail out instead of the
-    // instant pause (no-op for elements that already ended on their own)
-    fadeOutAndPause(currentAudio)
+    try {
+      currentAudio.pause()
+    } catch {
+      /* already gone */
+    }
     currentAudio = null
   }
   if (currentUrl) {
     URL.revokeObjectURL(currentUrl)
     currentUrl = null
   }
+}
+
+/** Phase 3-b · R7 supersede-leak fix: single-slot blob-URL claim. EVERY
+ *  createObjectURL path claims through here, so the previously claimed URL
+ *  is revoked at replacement time — not only in stop(). A superseded
+ *  playback URL can no longer be overwritten without its revocation.
+ *  (revokeObjectURL on an already-revoked URL is a no-op — the double
+ *  revoke after stopAudioOnly is harmless.) */
+function claimUrl(url: string) {
+  if (currentUrl) URL.revokeObjectURL(currentUrl)
+  currentUrl = url
+}
+
+/** Playback actually began — the audio-session machine walks into
+ *  'speaking' (from idle for chat/app utterances, from 'thinking' inside
+ *  the voice loop). Invalid edges (e.g. listening→speaking, an alert over a
+ *  live mic session) are rejected and recorded — see audio-session.ts. */
+function machineSpeaking() {
+  useAudioSession.getState().transition('speaking')
+}
+
+/** Natural end of OUR playback: the machine returns to idle only while it
+ *  still holds 'speaking' — a barge-in or a superseding pipeline owns the
+ *  next state and must not be flattened. */
+function settleMachineIdle() {
+  const s = useAudioSession.getState()
+  if (s.phase === 'speaking') s.transition('idle')
 }
 
 /** mlv-lead-4: audio-only teardown (no speakSeq bump) — internal callers
@@ -349,6 +339,9 @@ function stopAudioOnly() {
   cleanupAudio()
   const st = useMistStore.getState()
   if (st.neural.state === 'speaking') st.setNeuralState('dormant')
+  // the audio-session machine follows playback out (barge-in holds its own
+  // state until the voice loop walks it to listening)
+  settleMachineIdle()
 }
 
 /** base64 → Blob (for the NDJSON stream chunks). */
@@ -536,7 +529,7 @@ export const mistSpeech = {
     const url = URL.createObjectURL(blob)
     const audio = new Audio(url)
     currentAudio = audio
-    currentUrl = url
+    claimUrl(url) // revoke-then-replace — R7: the superseded URL never leaks
     if (ctx.busReady) mistAudioAttachMedia(audio)
 
     const finish = () => {
@@ -544,6 +537,7 @@ export const mistSpeech = {
       cleanupAudio()
       const st = useMistStore.getState()
       if (st.neural.state === 'speaking') st.setNeuralState('dormant')
+      settleMachineIdle()
       ctx.opts.onEnd?.()
     }
     audio.onended = finish
@@ -554,6 +548,7 @@ export const mistSpeech = {
     // Guard with seq check so a superseded utterance doesn't fire it.
     if (ctx.mySeq === speakSeq) {
       useMistStore.getState().setNeuralState('speaking')
+      machineSpeaking()
       ctx.opts.onStart?.()
     }
   },
@@ -593,7 +588,7 @@ export const mistSpeech = {
         const url = URL.createObjectURL(blob)
         const audio = new Audio(url)
         currentAudio = audio
-        currentUrl = url
+        claimUrl(url) // revoke-then-replace — R7
         if (ctx.busReady) mistAudioAttachMedia(audio)
         let settled = false
         const done = (ok: boolean) => {
@@ -611,6 +606,7 @@ export const mistSpeech = {
             if (ctx.mySeq === speakSeq && !started) {
               started = true
               useMistStore.getState().setNeuralState('speaking')
+              machineSpeaking()
               ctx.opts.onStart?.()
             }
           })
@@ -659,6 +655,7 @@ export const mistSpeech = {
     if (ctx.mySeq !== speakSeq) return
     const st = useMistStore.getState()
     if (st.neural.state === 'speaking') st.setNeuralState('dormant')
+    settleMachineIdle()
     ctx.opts.onEnd?.()
   },
 
@@ -701,7 +698,7 @@ export const mistSpeech = {
         const url = URL.createObjectURL(blob)
         const audio = new Audio(url)
         currentAudio = audio
-        currentUrl = url
+        claimUrl(url) // revoke-then-replace — R7
         if (ctx.busReady) mistAudioAttachMedia(audio)
         const done = () => {
           if (currentAudio === audio) cleanupAudio()
@@ -717,6 +714,7 @@ export const mistSpeech = {
             if (ctx.mySeq === speakSeq && !started) {
               started = true
               useMistStore.getState().setNeuralState('speaking')
+              machineSpeaking()
               ctx.opts.onStart?.()
             }
           })
@@ -787,6 +785,7 @@ export const mistSpeech = {
     if (ctx.mySeq !== speakSeq) return
     const st = useMistStore.getState()
     if (st.neural.state === 'speaking') st.setNeuralState('dormant')
+    settleMachineIdle()
     ctx.opts.onEnd?.()
   },
 
@@ -877,7 +876,7 @@ export const mistSpeech = {
         const url = URL.createObjectURL(blob)
         const audio = new Audio(url)
         currentAudio = audio
-        currentUrl = url
+        claimUrl(url) // revoke-then-replace — R7
         if (busReady) mistAudioAttachMedia(audio)
         const done = () => {
           if (currentAudio === audio) cleanupAudio()
@@ -894,6 +893,7 @@ export const mistSpeech = {
             if (mySeq === speakSeq && !started) {
               started = true
               useMistStore.getState().setNeuralState('speaking')
+              machineSpeaking()
               opts.onStart?.()
             }
           })
@@ -1026,6 +1026,7 @@ export const mistSpeech = {
         if (mySeq !== speakSeq) return 'streamed' // superseded — no state work
         const st = useMistStore.getState()
         if (st.neural.state === 'speaking') st.setNeuralState('dormant')
+        settleMachineIdle()
         opts.onEnd?.()
         return playedAny || voiceOff ? 'streamed' : 'replaced'
       },

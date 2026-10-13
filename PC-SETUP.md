@@ -181,3 +181,19 @@ the best voice tier this PC can run and installs it on the spot.
 | Port 3000 busy | Something else grabbed it — `stop.bat` then `restart.bat` |
 
 Welcome home, Mist. 🌘
+
+## 10 · Security (v3)
+
+She now seals herself against everyone except you. Three layers, all automatic:
+
+**1. Paired sessions.** First time you open `http://localhost:3000`, she pairs your browser (a `mist_session` cookie, HttpOnly + SameSite=Strict, 30 days). Every state-changing API call needs that cookie — a random webpage in your browser can't trigger POSTs, and neither can another device. To pair a second browser/device: `run.bat` prints a **pair code**; open `http://localhost:3000/api/mist/pair?code=THE_CODE`.
+
+**2. Bridge token.** Full system powers (the bridge) need a 256-bit token stored in `~/.mist/bridge.json` (readable only by you). She and the bridge exchange it automatically on the same machine — you never type it. `run.bat` prints it; Settings → Local Bridge shows it. Pointing her at a bridge on *another* machine? Copy that machine's token into `MIST_BRIDGE_TOKEN` in `.env`.
+
+**3. Loopback-only services.** Her satellite services (neural :3003, mesh :3004, browser pilot :3030, bridge :8734) now bind to `127.0.0.1` — invisible to your LAN. Browser pages carrying a foreign `Origin` are refused outright; the bridge rejects any `Host` that isn't its own loopback address (no DNS-rebinding).
+
+**Honest limits, plainly:**
+- Until her Phase 2 Arbiter ships, the bridge **denies the actuator actions** (run_command, file writes/deletes, UI automation, app launches, Hermes delegation) with an honest "gated" error — read-only system actions keep working. This is deliberate: those powers return per-call-approved, never silently.
+- Exports never contain your keys by default; the optional encrypted-keys mode needs a passphrase you choose.
+- Git history written *before* v3 still contains old secrets (rewriting history is a decision for you, not her — flagged in the worklog).
+- Flags for special setups (all default off): `MIST_LAN=1` (share her on your LAN — trusted network only), `MIST_STRICT_HOST=1` (refuse foreign Host headers, for direct-exposure setups), `MIST_ALLOW_REMOTE_BRIDGE=1` (let `*_BASE_URL` / bridge URL point off-machine), `MIST_OPEN_API=1` (drop the session gate — not recommended), `MIST_RATE_LIMIT_OFF=1` (disable per-class rate limits).
